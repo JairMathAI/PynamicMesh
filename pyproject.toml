@@ -1,0 +1,43 @@
+[project]
+name = "PynamicMesh"
+version = "0.0.1"
+authors = [
+    { name="Jair Sanchez", email="jonathanjairsc@gmail.com"},
+]
+description = "A ready to use complete tool-box for modeling complex spatial-temporal dynamic over meshes based on Topology, Differential Geometry and Physics."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+keywords = ["mesh analysis", "models", "dynamic"]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "pyfmaps",  
+    "vedo",
+    "networkx",
+    "seaborn",
+    "pyvista", 
+    "pyyaml",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/MMV-Lab/PynamicMesh"
+
+[tool.setuptools]
+include-package-data = true
+zip-safe = false
+
+[tool.setuptools.packages.find]
+include = ["PynamicMesh", "PynamicMesh.*"]
+
+[tool.setuptools.package-dir]
+PynamicMesh = "PynamicMesh"
+
+[project.scripts]
+run_pynamic = "PynamicMesh.bin.run_pynamic:main"

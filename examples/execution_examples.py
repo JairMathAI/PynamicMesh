@@ -1,14 +1,23 @@
-from core.pipelines import run_pipeline
-from core.reeb_graph import graph_time_analysis, plot_dynamic_graph_analysis, visualize_reeb_graphs, edit_graph
-from core.physic_model import  visualize_physics
-from core.custom_fm import  visual_selection_edition, precompute_landmarks
+from PynamicMesh.core.pipelines import run_pipeline
+from PynamicMesh.core.reeb_graph import graph_time_analysis, plot_dynamic_graph_analysis, visualize_reeb_graphs, edit_graph
+from PynamicMesh.core.physic_model import  visualize_physics
+from PynamicMesh.core.custom_fm import  visual_selection_edition, precompute_landmarks
 
 ####################################################################################################### Paths reference list ##########################################################################################################################################
-base_mesh_path = './Mesh_models'
+
+####################################################################################################### Linux #########################################################################################################################################################
+base_mesh_path = './PynamicMesh/Mesh_models'
 mesh_path = './PynamicMesh/Mesh_models/scene1'
 matrix_path = './PynamicMesh/Results/scene1/Transform_Matrices'
 reeb_path = './PynamicMesh/Results/scene1/Reeb_Graphs'
 csv_file_path = './PynamicMesh/Results/scene1/Graph_analysis/time_analysis.csv'
+
+###################################################################################################### Windos #########################################################################################################################################################
+base_mesh_path = r'\PynamicMesh\Mesh_models'
+mesh_path = r'\PynamicMesh\Mesh_models\scene1'
+matrix_path = r'\PynamicMesh\Results\scene1\Transform_Matrices'
+reeb_path = r'\PynamicMesh\Results\scene1\Reeb_Graphs'
+csv_file_path = r'\Results\scene1\Graph_analysis\time_analysis.csv'
 
 ###########################################################################################################################################################################################################################################################################
 
@@ -54,6 +63,7 @@ compute_isometric_analysis = True
 FM_k_eigenfunctions = 100
 FM_descriptors = 'WKS+HKS'
 FM_landmarks = 'Precomputed'
+compute_physic_fields = True
 
 ####################################################################################################### Reeb Graph Settings ###############################################################################################################################################
 compute_RG = True
@@ -61,7 +71,6 @@ compute_graph_time_analysis = True
 reeb_scalar_field = 'geodesic'
 bins = 30
 vertex_ref_index = [4896]
-compute_physic_fields = True
 
 ####################################################################################################### Pipeline Runing ###################################################################################################################################################
 print('Executing pipeline ...')
@@ -73,11 +82,11 @@ run_pipeline(
     k_eigenfunc=FM_k_eigenfunctions,
     descriptor=FM_descriptors,
     landmarks=FM_landmarks,
+    compute_physic_fields=compute_physic_fields, 
     compute_reeb=compute_RG,
     time_graph_analysis=compute_graph_time_analysis,
     reeb_scalar=reeb_scalar_field,
     bins=bins,
-    compute_physic_fields=compute_physic_fields, 
     vertex_ref_index=vertex_ref_index
     )
 

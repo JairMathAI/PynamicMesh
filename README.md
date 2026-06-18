@@ -10,27 +10,27 @@ conda create -y -n PynamicMesh -c conda-forge python=3.11
 conda activate PynamicMesh
 ```
 
-Clone repo and install dependencies:
+Clone the repo and install dependencies:
 
 ```bash
 git clone https://github.com/MMV-Lab/PynamicMesh
 cd PynamicMesh
-pip install -r requirements.txt
+pip install .
 ```
 
 # Example Data
 
-All the following examples can be replicated using the [meshes](./examples/Mesh_models/) and the generated example files provided [here](./examples), and all the code usage syntax is summarized in the provided [code](./PynamicMesh.py).
+All the following examples can be replicated using the [meshes](./examples/Mesh_models/) and the generated example files provided [here](./examples), and all the code usage syntax is summarized in the provided [code](./examples/execution_examples.py).
 
 The provided tools were developed independently into pure computations and visualization/graphical tools in order to keep the flexibility of running the computations on a pure non-graphic node or high-performance computing cluster.
 
 # Project overview
 
-Given a family of meshes $\mathscr{M} = \{ M_{t_i} \mid 0 \leqslant i \leqslant T \}$ where each mesh $M_{t_i}$ encodes the spatial deformation of the shape at a specific time $t_i$, we deal with a shape deformation that provides a full geometrical description of the dynamics related to the deformation pipeline.
+Given a family of meshes $\mathscr{M} = \{ M_{t_i} | 0 \leqslant i \leqslant T \}$ where each mesh $M_{t_i}$ encodes the spatial deformation of the shape at a specific time $t_i$, we deal with a shape deformation that provides a full geometrical encoding of the dynamics related to the deformation.
 
 <img src="./assets/transf.gif" style="max-width: 100%; height: auto; display: block; margin: 0 auto;"/>
 
-PynamicMesh offers a full general range of pipelines based on Topology, Differential Geometry, and Physics in order to model the complex dynamics encoded in the transformation, allowing the extraction of features that help to characterize and understand the dynamical pipeline.
+PynamicMesh offers a full general range of pipelines based on Topology, Differential Geometry, and Physics in order to model the complex dynamics encoded in the transformation, allowing the extraction of features that help to characterize and understand the dynamical process.
 
 For a detailed and applied understanding of meshes as Manifolds and triangulations, the following [Jupyter Notebook](https://github.com/JairMathAI/Understanding_Persistent_Homology/blob/main/Persistent_Homology.ipynb) might interest you.
 
@@ -52,14 +52,109 @@ We can use a scalar function defined over each mesh $\psi_{t_{i-1}}: M_{t_{i-1}}
 
 <img src="./assets/scalar_map.PNG" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
 
-This composition induces a linear functional, such that for every function $f:M_{t_{i-1}} \to \mathbb{R}$ we have $\mathcal{F}_{\varphi_n}(f) = f(\varphi_n^{-1})$, so we have the functional transformation $\mathcal{F}_{\varphi_n} : \mathcal{L}(M_{t_{i-1}},\mathbb{R}) \to \mathcal{L}(M_{t_{i}},\mathbb{R})$ where the task to find $\varphi_n$ now means finding a representation for the functional $\mathcal{F}_{\varphi_n}$.
+In our case we are goind to use the Dirichlet energy on each point of the mesh for the wave propagation function, the heat diffusion function, or the sum of both: $\displaystyle E[\Psi]=\frac{1}{2}\int ||\Psi(x)||^2 dx$.
 
-As the linear function spaces $\mathcal{L}(M_{t_{i-1}},\mathbb{R})$ and $\mathcal{L}(M_{t_{i}},\mathbb{R})$ are vector spaces, we can use the Laplace-Beltrami eigenfunctions basis and apply an optimization pipeline to determine the functional map (matrix representation) of the functional $\mathcal{F}_{\varphi_n} = C_{t_{i-1} \to t_{i}} \in \mathbb{M}_{k \times k}(\mathbb{R})$ that encodes the spectral representation of the functional and the vector $\vec{v}$ that encodes the explicit (spatial) vertex transformation, where $v_j=k$ means that the vertex $j$ is transformed into the vertex $k$.
+<div style="display: flex; gap: 10px; flex-wrap: wrap;">
+  <img src="./assets/wave_eq.gif" style="max-width: 100%; height: auto;"/>
+  <img src="./assets/heat_eq.gif" style="max-width: 100%; height: auto;"/>
+</div>
 
-<b>Notes:</b>
-- This pipeline works for meshes with different numbers of vertices because it is based on a pre-established eigenfunction basis of size $k$.
-- The respective $\psi_{t_{i-1}}: M_{t_{i-1}} \to \mathbb{R}$ maps used for computations are the Dirichlet energy over the mesh of the wave propagation function, the heat diffusion function, or the sum of both: $\displaystyle E[\Psi]=\frac{1}{2}\int ||\Psi(x)||^2 dx$.
-- The Dirichlet energy $E[\Psi]$ is insensitive to spatial symmetries, so the maps could fail on symmetric regions. To solve this, the use of landmarks as reference points is allowed; this induces conditions on the optimization pipeline in order to map the symmetric regions correctly.  
+The composition $\psi_{t_{i-1}}(\varphi_n^{-1})$ induce a linear functional, such that for every function $f:M_{t_{i-1}} \to \mathbb{R}$ we have $\mathcal{F}_{\varphi_n}(f) = f(\varphi_n^{-1})$, so we have the functional transformation $\mathcal{F}_{\varphi_n} : \mathcal{L}(M_{t_{i-1}},\mathbb{R}) \to \mathcal{L}(M_{t_{i}},\mathbb{R})$ where the task to find $\varphi_n$ now means finding a representation for the functional $\mathcal{F}_{\varphi_n}$.
+
+As the linear function spaces $\mathcal{L}(M_{t_{i-1}},\mathbb{R})$ and $\mathcal{L}(M_{t_{i}},\mathbb{R})$ are vector spaces, so they should have a basis of functions $\displaystyle \{\phi_j ^{M_{t_{i-1}}}\}_{j\in J}$ and $\displaystyle \{\phi_k^{M_{t_{i}}}\}_{k\in K}$ so let's find it using the Laplace-Beltrami operator.
+
+If we apply the [ Finite Element Method (FEM)](https://en.wikipedia.org/wiki/Finite_element_method#Discretization) to the Laplace-Beltrami equation of a function $f$ on a triangle mesh $\Delta f = - div( \nabla f)$.
+
+Means that we want to compute the gradient of a function defined on a triangle, but locally the function varies linearly within each triangle $\Delta f = |f(v_j)-f(v_i)|$ . When we integrate the squared gradient over the surface $\displaystyle \frac{1}{2}\sum |f(v_j)-f(v_i)|^2 $, the result simplifies to a weighted sum of the differences between neighboring vertex values.
+
+$$\frac{1}{2}\sum_{ij} w_{ij} [f(v_j)-f(v_i)]$$
+
+<img src="./assets/cot.PNG" style="max-width: 100%; height: auto; display: block; margin: 0 auto;"/>
+
+We can contruct the Connectivity matrix or the [Cotan-Laplace operator](https://en.wikipedia.org/wiki/Discrete_Laplace_operator)
+
+The "connectivity" is encoded in the adjacency of the mesh. The Laplacian matrix $L$ is constructed as:
+
+$$L_{ij} = \left\{ \begin{array}{cl}
+-w_{ij} & : v_i\to v_j \text{conected}\\
+0 & : \text{ no conexion} \\
+\end{array} \right.$$
+
+For the diagona the sum of weights of all edges connected to $v_i$
+
+$$ L_{ii} = \sum w_ii $$
+
+This matrix $L$ effectively describes how the Dirichlet energy (heat, or waves) flows from vertex i to its neighbors. Because it is built using the cotangents of the actual angles in the mesh, it is geometry-aware it accounts for the shape and skewness of the triangles, not just the connectivity.
+
+Then for every vertex $v_i$ on the mesh we can compute the Barycentric Area (one-third of the sum of the areas of all triangles T that are connected to that $v_i$) $\displaystyle A_{i} = \frac{1}{2}\sum_{T\in\mathcal{F}(i)} Area(T) $ where $\displaystyle Area(T)=\frac{1}{2}||(v_2-v_1)\times(v_3-v_1)||$ and $(v_3,v_2,v_3)$ are the vertex of a triangle. We can construct the diagonal matrix:
+
+$$W_{ij} = \left\{ \begin{array}{cl}
+A_i & : i=j\\
+0 & \text{ other case} \\
+\end{array} \right.$$
+
+This matrix essentially encode the surface area contribution of each vertex. Because a mesh is made of triangles, the "area" of a vertex is defined by the triangles that share it.
+
+Then we can solve the generalized eigenvalue decomposition for a matrix $\Phi$
+
+$$L\Phi=W\Lambda\Phi$$
+
+Only for the first $k$ eigenvectors we do not compute all the eigenvectors (which would be computationally expensive). Since functional maps typically work on the first $k$ "low-frequency" eigenfunctions (the "spectral footprint").
+
+Once solved, each column $\phi_j$​ of the matrix $\Phi$ contains the values of the $j$-th eigenfunction at every vertex of the mesh.
+
+We can obtain this matrix for the $t_{i-1}$ mesh  $\Phi^{M_{t_{i-1}}}$ and the $t_i$ mesh $\Phi^{M_{t_{i}}}$ to obtain the respective basis from the domain and the codomain of $\varphi_n$.
+
+In theory this basis allows to express our fucntional as a linear combination: 
+
+$$\mathcal{F}_{\varphi_n}(f) = \sum_k\sum_j a_jc_{jk}\phi_k^{M_{t_{i}}}$$
+
+This provide a matrix representation $\mathcal{C}$ determined by the coefficents $c_{jk}$ 
+
+We can express this coeficents using a inner product to project the tranformation represented on the domain base into the codomain base: 
+
+$$\displaystyle c_{jk}= \left\langle \mathcal{F}_{\varphi_n}(\phi_k^{M_{t_{i}}}) , \phi_j ^{M_{t_{i-1}}} \right\rangle$$
+
+But now we have a matrix representation $c_{jk}$ but it depens on $\varphi_n$ which is unknow and to describe $\varphi_n$ somehow we need to find $c_{jk}$
+
+We can use our Dirichlet energy descriptors in order of get a clue:
+
+We can project the Dirichlet energy on mesh $M_{t_{i-1}}$ And on mesh $M_{t_{i}}$ to obtain the vectors:
+
+$$ \Psi^{t_{i-1}} =  \Phi^{T} W E[\Psi] \hspace{6mm} \Psi^{t_{i}} =  \Phi^{T} W E[\Psi]  $$
+
+The functional map matrix $\mathcal{F}_{\varphi_n} = C_{t_{i-1} \to t_{i}} \in \mathbb{M}_{k \times k}(\mathbb{R})$ that we seek now is given for the one that minimizes the following objective function:
+
+$$
+\min_{C} E(C) = \underbrace{\sum_{m=1}^{n_f} \| C \Psi^{t_{i-1}}_m - \Psi^{t_{i}}_m \|^2}_{E_{desc}} + \underbrace{\lambda_{reg} \| C \Lambda_1 - \Lambda_2 C \|^2}_{E_{reg}} + \underbrace{\lambda_{land} \sum_{l=1}^L \| C \Phi_1(x_l, :)^\top - \Phi_2(y_l, :)^\top \|^2}_{E_{land}}
+$$
+
+Were:
+
+$n_f$: Number of descriptor functions (one in our case).
+
+$\Lambda_1,\Lambda_2:$ Diagonal matrices of eigenvalues for Mesh $t_{i-1}$ and Mesh $t_i$.
+
+$\Phi_1(x_l, :):$ The row vector of the eigenfunction matrix $\Phi_1$​ corresponding to landmark vertex $x_l$.
+
+$\lambda_{reg},\lambda_{land}:$ Scalar weighting parameters to balance the influence of the three energy terms.
+
+$E_{desc} :$ Forces the map to align the chosen descriptors.
+
+$E_{reg}:$ Enforces the structural consistency (commutativity) of the transformation.
+
+$E_{land}:$ Anchors the map at specific known landmark correspondences $(x_l,y_l)$ (Symetries constrain).
+
+This optimal matrix $C$ contain the spectral map representation (egenfunction domain). To recover the spatial tranformation vector (vertex domain) $\vec{v}\in \mathbb{N}^k$ where $v_i=j$ describe de correspondance vertex to vertex transformation:
+
+We need to take the basis representation of a point $x_j\in M_{t_{i-1}}$​, which is simply the $j$-th row of $\Phi_1$, denoted $\Phi_1(j, :)$.
+
+And then transform it to the spectral domain of $M_{t_{i}}$: 
+$$b_{x_j}=C\Phi_1(j, :)^\top$$
+
+Take the vertex $k$ in $M_{t_{i}}$ that is closest to this transformed representation:
+
+$$v_j = \arg \min_{k \in \text{Vertices}(M_{t_{i}})} \| \Phi_2(k, :)^\top - C \Phi_1(j, :)^\top \|^2$$
 
 Having this matrix representation, we can compute a large variety of descriptors to characterize the dynamics.
 
@@ -75,14 +170,14 @@ The full pipeline can be summarized through the following scheme:
 The computations are executed and managed through the syntax:
 
 ```python
-from core.pipelines import run_pipeline
+from PynamicMesh.core.pipelines import run_pipeline
 run_pipeline(**args)
 ```
 
 In order to compute the Functional Map transformations, run:
 
 ```python
-from core.pipelines import run_pipeline
+from PynamicMesh.core.pipelines import run_pipeline
 run_pipeline(
     path_str='base/path',
     matrix_tranformation=True,
@@ -94,6 +189,13 @@ run_pipeline(
     compute_physic_fields=True,
 )
 ```
+
+Or you can set your parameters on the [yaml](./examples/config.yaml) file, and within the PynamicMesh enviroment run on the comand line:
+
+```python
+run_pynamic --config /path/to/the/config.yaml
+```
+
 
 <details>
 <summary><span style="font-size:21px;"> Functional Map Parameters</span></summary>
@@ -181,7 +283,7 @@ landmark (str) : 'precomputed'
 For the precomputed landmarks:
 
 ```python
-from core.custom_fm import precompute_landmarks
+from PynamicMesh.core.custom_fm import precompute_landmarks
 
 precompute_landmarks("./PynamicMesh/Mesh_models",'FM')
 ```
@@ -197,7 +299,7 @@ At the end, the `.npy` file with our vertex selection on each frame will be stor
 If we use the other function:
 
 ```python
-from core.custom_fm import visual_selection_edition
+from PynamicMesh.core.custom_fm import visual_selection_edition
 
 visual_selection_edition("./PynamicMesh/Mesh_models/scene1",'FM')
 ```
@@ -218,14 +320,14 @@ We can run our matrix transformation computing; at the end of the run, the pipel
 Let's run first the pipeline without landmarks to see the results.
 
 ```python
-from core.pipelines import run_pipeline
+from PynamicMesh.core.pipelines import run_pipeline
 run_pipeline(base_mesh_path, matrix_tranformation=True, descriptor='WKS+HKS', landmarks=None, k_eigenfunc=100)
 ```
 
 Compute the descriptors and visualize them with:
 
 ```python
-from core.physic_model import visualize_physics
+from PynamicMesh.core.physic_model import visualize_physics
 visualize_physics("./PynamicMesh/Mesh_models/", "./PynamicMesh/Results/scene1/Transform_Matrices/", on_time=False)
 ```
 
@@ -269,8 +371,8 @@ The Camel is almost symmetric by the middle; due to this, the $\Delta$-Color tra
 The used landmarks in these examples are provided [here](./examples/landmarks.npy).
 
 ```python
-from core.pipelines import run_pipeline
-from core.physic_model import visualize_physics
+from PynamicMesh.core.pipelines import run_pipeline
+from PynamicMesh.core.physic_model import visualize_physics
 
 run_pipeline(base_mesh_path, matrix_tranformation=True, descriptor='WKS+HKS', landmarks='precomputed', k_eigenfunc=100)
 visualize_physics("./PynamicMesh/Mesh_models/", "./PynamicMesh/Results/scene1/Transform_Matrices/", on_time=False)
@@ -377,8 +479,11 @@ Defining the equivalence relation means that we need to look at how many points 
 Saying that the graph has the quotient topology means that the graph captures the topology relationships of the mesh.
 
 The idea is easy to follow graphically: 
-
+<div style="display: flex; gap: 10px; flex-wrap: wrap;">
 <img src="./assets/reeb_T.png" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
+<img src="./assets/rg.gif" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
+</div>
+
 
 The full dynamical analysis pipeline can be summarized through the following scheme:
 
@@ -392,14 +497,14 @@ The full dynamical analysis pipeline can be summarized through the following sch
 The computations are executed and managed through the syntax:
 
 ```python
-from core.pipelines import run_pipeline
+from PynamicMesh.core.pipelines import run_pipeline
 run_pipeline(**args)
 ```
 
 In order to compute the Reeb Graph run:
 
 ```python
-from core.pipelines import run_pipeline
+from PynamicMesh.core.pipelines import run_pipeline
 run_pipeline(
     path_str='base/path', 
     compute_reeb=True,
@@ -408,6 +513,12 @@ run_pipeline(
     bins=30,
     **scalar_fields_args 
 )
+```
+
+Or you can set your parameters on the [yaml](./examples/config.yaml) file, and within the PynamicMesh enviroment run on the comand line:
+
+```python
+run_pynamic --config /path/to/the/config.yaml
 ```
 
 <details>
@@ -642,7 +753,7 @@ vertex_ref_index (str): "precomputed"
 
 In each case of the Heat diffusion, Harmonic, and Geodesic based scalar maps, the optional reference point can be selected graphically with the execution of the corresponding code:
 ```python 
-from core.custom_fm import visual_selection_edition, precompute_landmarks
+from PynamicMesh.core.custom_fm import visual_selection_edition, precompute_landmarks
 
 
 ################################ Sources Vertex index precompute visual tools for 'heat_diffusion' in Reebs #############################################################
@@ -685,8 +796,8 @@ After the modeling pipeline execution, the files `Reeb_Ti.pkl` and `Scalar_Ti.np
 With these files, we can visualize the evolution of the field and the graph over time:
 
 ```python 
-from core.pipelines import run_pipeline
-from core.reeb_graph import graph_time_analysis, visualize_reeb_graphs
+from PynamicMesh.core.pipelines import run_pipeline
+from PynamicMesh.core.reeb_graph import graph_time_analysis, visualize_reeb_graphs
 
 print('Executing modeling ...')
 run_pipeline(base_mesh_path, compute_reeb=True, bins=30 , reeb_scalar='geodesic', vertex_ref_index=[4896])
@@ -728,7 +839,7 @@ The original computed graphs are not overridden. The modified graphs will be sto
 When the desired graphs are ready and saved, we can run a temporal analysis and generate the plot of the results and the CSV with the data:
 
 ```python 
-from core.reeb_graph import graph_time_analysis, plot_dynamic_graph_analysis
+from PynamicMesh.core.reeb_graph import graph_time_analysis, plot_dynamic_graph_analysis
 
 print('Graph path analysis...')
 graph_time_analysis(reeb_path)
