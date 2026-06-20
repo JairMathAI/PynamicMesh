@@ -18,7 +18,6 @@ from scipy.linalg import eigvalsh
 import warnings
 import copy
 
-
 def edit_graph(mesh_folder_path, reeb_folder_path):
     print("\nStarting Interactive Split-Screen Graph Editor with Undo...")
     
@@ -44,11 +43,12 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
     target_folder = out_root / scene_name / 'Reeb_graph_manual_trim'
     os.makedirs(target_folder, exist_ok=True)
     
-    # Load all graphs into memory
+    # Load all graphs into memory (coordinates are already aligned by the pipeline)
     graphs = []
     for i in range(num_frames):
         with open(reeb_files[i], 'rb') as f:
-            graphs.append(pickle.load(f))
+            G = pickle.load(f)
+            graphs.append(G)
             
     state = {
         'frame': 0,
@@ -64,6 +64,7 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
     }
 
     plotter = pv.Plotter(shape=(1, 2), title="Reeb Graph Split-Screen Editor")
+    plotter.add_axes()
 
     def ensure_node_limits(node_id, G, mesh_pv):
         """Safely initializes and extracts localized geometry limits and thickness parameters for a node."""
@@ -90,6 +91,8 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
         pad = np.full((tm.faces.shape[0], 1), 3, dtype=np.int64)
         pv_faces = np.hstack((pad, tm.faces)).flatten()
         mesh_pv = pv.PolyData(tm.vertices, pv_faces)
+        mesh_pv.rotate_x(90, inplace=True)
+        mesh_pv.rotate_z(90, inplace=True)
         
         bounds = mesh_pv.bounds
         state['diag_size'] = np.linalg.norm([bounds[1]-bounds[0], bounds[3]-bounds[2], bounds[5]-bounds[4]])
@@ -101,7 +104,6 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
         scalar_array = np.load(scalar_files[frame_idx])
         mesh_pv.point_data['Dynamic_Scalar'] = scalar_array
         
-        # render=False removed to ensure interactive point picking registration is stable
         plotter.add_mesh(mesh_pv, scalars='Dynamic_Scalar', cmap='viridis', name='z_mesh', show_scalar_bar=True, pickable=True)
         
         plotter.add_points(
@@ -259,7 +261,7 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
                 if closest_edge is not None and min_dist < pick_tolerance:
                     G.remove_edge(*closest_edge)
                 else:
-                    state['history'].pop() # Revert history, nothing deleted
+                    state['history'].pop() 
                     return
                 
             else:
@@ -292,11 +294,9 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
                             state['selected_node'] = None
                     
                     elif mode in ['inner', 'outer']:
-                        state['selected_node'] = clicked_node_id # Retain selection highlight for feedback
+                        state['selected_node'] = clicked_node_id 
                         node_data = ensure_node_limits(clicked_node_id, G, mesh_pv)
                         
-                        # Adaptive Step Size: Proportional to local limits. 
-                        # Divided by 20 allows exactly 10 clicks to consistently hit the exact midpoint.
                         step = node_data['max_depth'] / 20.0
                         
                         if mode == 'inner':
@@ -310,7 +310,7 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
                                 
                         node_data['pos'] = node_data['orig_pos'] - (node_data['normal'] * node_data['current_depth'])
                         
-                    else: # Normal Mode
+                    else: 
                         if sel_node is not None:
                             if sel_node != clicked_node_id and G.has_node(sel_node) and G.has_node(clicked_node_id):
                                 G.add_edge(sel_node, clicked_node_id)
@@ -376,6 +376,7 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
     for i in range(state['total']):
         if state['modified'][i]:
             save_path = target_folder / reeb_files[i].name
+            
             with open(save_path, 'wb') as f:
                 pickle.dump(state['graphs'][i], f)
             saved_count += 1
@@ -385,7 +386,6 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
         print("No changes detected across frames. Save skipped.")
     else:
         print(f"[SUCCESS] Exported {saved_count} updated topological structures to: {target_folder}")
-
 
 def graph_time_analysis(reeb_folder_path,single_file=True):
     """
@@ -707,7 +707,6 @@ def get_scalar_field(vertices, faces, method="z", prev_vertices=None, p2p=None,
 
         return compute_harmonic_field(trimesh_obj, source_idx, sink_idx)
 
-    # --- Multi-Scalar / Mapper-type Construction ---
     elif method == "multi_pca":
         # Extracts 1st Principal Component from multiple fields to create a 1D Mapper lens
         fields = kwargs.get("fields", ["z", "mean_curvature", "gaussian_curvature"])
@@ -800,6 +799,7 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files):
     pl = pv.Plotter(shape=(1, 2))
     pl.title = "Cell Topology Evolution (Reeb Graphs)"
     state = {'frame': 0, 'total': len(mesh_files)}
+    pl.add_axes()
     
     pl.subplot(0, 0)
     pl.camera_position = 'iso'
@@ -808,13 +808,14 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files):
     
     def update_frame(frame_idx):
         tm = TriMesh(mesh_files[frame_idx])
-        
+
         faces_pv = np.empty((tm.faces.shape[0], 4), dtype=int)
         faces_pv[:, 0] = 3
         faces_pv[:, 1:] = tm.faces
         meshn = pv.PolyData(tm.vertices, faces_pv.flatten())
+        meshn.rotate_x(90, inplace=True)
+        meshn.rotate_z(90, inplace=True)
         
-
         bounds = meshn.bounds
         diag_size = np.linalg.norm([
             bounds[1] - bounds[0], 
@@ -823,7 +824,6 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files):
         ])
         node_radius = diag_size * 0.005
         edge_radius = diag_size * 0.002
-
 
         scalar_array = np.load(scalar_files[frame_idx])
         meshn.point_data['Dynamic_Scalar'] = scalar_array
@@ -843,12 +843,10 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files):
         pl.add_mesh(meshn, color='white', opacity=0.25, name='ghost_mesh', render=False)
         
         if reeb_pv.n_points > 0:
-            # Use dynamic node_radius here
             spheres = reeb_pv.glyph(geom=pv.Sphere(radius=node_radius), scale=False, orient=False)
             pl.add_mesh(spheres, color='red', name='reeb_nodes', render=False)
             
             if reeb_pv.n_lines > 0:
-                # Use dynamic edge_radius here
                 tubes = reeb_pv.tube(radius=edge_radius) 
                 pl.add_mesh(tubes, color='blue', name='reeb_edges', render=False)
             else:
@@ -883,8 +881,6 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files):
     pl.add_text("Time Control:\n  right arrow key : Next Mesh\n   left arrow key : Prev Mesh", 
                 position='lower_left', font_size=6, color='black')
     pl.show(full_screen=True)
-
-
 
 def visualize_reeb_graphs(mesh_folder_path, reeb_folder_path):
     mesh_folder = Path(mesh_folder_path)

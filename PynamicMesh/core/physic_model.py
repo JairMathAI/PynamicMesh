@@ -251,6 +251,10 @@ def create_pv_polydata(d):
     mesh.point_data['Area_Strain'] = d['area_strain']
     mesh.point_data['Normal_Flow'] = d['normal_flow']
     mesh.point_data['Tangential_Flow'] = d['tangential_flow']
+
+    mesh.rotate_x(90, inplace=True)
+    mesh.rotate_z(90, inplace=True)
+
     return mesh
 
 
@@ -275,9 +279,11 @@ def launch_physics_viewer(frames_data):
     pl.title = "Cell Dynamics Multi-Physics Gallery"
     state = {'frame': 0, 'total': len(meshes)}
     
+    
     for i in range(2):
         for j in range(3):
             pl.subplot(i, j)
+            pl.add_axes()
             pl.camera_position = 'iso' 
     
     def update_frame(frame_idx):

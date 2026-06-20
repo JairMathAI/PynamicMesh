@@ -106,6 +106,7 @@ def visual_selection_edition(scene_folder_path, mood='FM'):
 
     while True:
         plotter = pv.Plotter(title=f"Dynamic Landmark Viewer & Editor [{mood}]")
+        plotter.add_axes()
 
         def hover_callback(caller, event):
             if state['current_mesh'] is None:
@@ -158,6 +159,8 @@ def visual_selection_edition(scene_folder_path, mood='FM'):
             pad = np.full((tm.faces.shape[0], 1), 3, dtype=np.int64)
             pv_faces = np.hstack((pad, tm.faces)).flatten()
             mesh_pv = pv.PolyData(tm.vertices, pv_faces)
+            mesh_pv.rotate_x(90, inplace=True)
+            mesh_pv.rotate_z(90, inplace=True)
             state['current_mesh'] = mesh_pv
 
             plotter.add_mesh(mesh_pv, name='main_mesh', color="white", show_edges=True, edge_color="green", opacity=1.0)
@@ -402,10 +405,13 @@ def pick_single_mesh(vertices, faces, title, marker_color="blue", expected_count
         return pv.PolyData(v, pv_faces)
 
     mesh_pv = create_pv_mesh(vertices, faces)
+    mesh_pv.rotate_x(90, inplace=True)
+    mesh_pv.rotate_z(90, inplace=True)
     bounds = mesh_pv.bounds
     sphere_radius = max(bounds[1]-bounds[0], bounds[3]-bounds[2], bounds[5]-bounds[4]) * 0.003
 
     plotter = pv.Plotter(title=title)
+    plotter.add_axes()
     
     plotter.add_mesh(mesh_pv, color="white", show_edges=True, edge_color="green", opacity=1.0)
     plotter.add_points(mesh_pv.points, color="yellow", render_points_as_spheres=True, point_size=5)

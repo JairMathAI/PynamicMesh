@@ -36,5 +36,5 @@ scene2:
   Reeb_Graph:
     compute_reeb: True
     time_graph_analysis: True
-    reeb_scalar: 'x'
+    reeb_scalar: 'y'
     bins: 5

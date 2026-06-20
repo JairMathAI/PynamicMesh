@@ -15,7 +15,12 @@ Clone the repo and install dependencies:
 ```bash
 git clone https://github.com/MMV-Lab/PynamicMesh
 cd PynamicMesh
+
 pip install .
+
+# editable mood for developers
+
+pip install -e .
 ```
 
 # Example Data
