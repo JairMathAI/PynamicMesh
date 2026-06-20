@@ -6,11 +6,11 @@ from PynamicMesh.core.custom_fm import  visual_selection_edition, precompute_lan
 ####################################################################################################### Paths reference list ##########################################################################################################################################
 
 ####################################################################################################### Linux #########################################################################################################################################################
-base_mesh_path = './PynamicMesh/Mesh_models'
-mesh_path = './PynamicMesh/Mesh_models/scene1'
-matrix_path = './PynamicMesh/Results/scene1/Transform_Matrices'
-reeb_path = './PynamicMesh/Results/scene1/Reeb_Graphs'
-csv_file_path = './PynamicMesh/Results/scene1/Graph_analysis/time_analysis.csv'
+base_mesh_path = '/PynamicMesh/Mesh_models'
+mesh_path = '/PynamicMesh/Mesh_models/scene1'
+matrix_path = '/PynamicMesh/Results/scene1/Transform_Matrices'
+reeb_path = '/PynamicMesh/Results/scene1/Reeb_Graphs'
+csv_file_path = '/PynamicMesh/Results/scene1/Graph_analysis/time_analysis.csv'
 
 ###################################################################################################### Windos #########################################################################################################################################################
 base_mesh_path = r'\PynamicMesh\Mesh_models'
@@ -60,7 +60,8 @@ precompute_landmarks(base_mesh_path,'harmonic')
 compute_FM = True
 compute_FMdiagonal_analysis = True
 compute_isometric_analysis = True
-FM_k_eigenfunctions = 100
+FM_k_eigenfunctions = (10,10)
+FM_k_eigenvalues = 100
 FM_descriptors = 'WKS+HKS'
 FM_landmarks = 'Precomputed'
 compute_physic_fields = True
@@ -79,7 +80,8 @@ run_pipeline(
     matrix_tranformation=compute_FM,
     diagonal_analysis=compute_FMdiagonal_analysis,
     isometric_analysis=compute_isometric_analysis,
-    k_eigenfunc=FM_k_eigenfunctions,
+    k_eigenfunctions=FM_k_eigenfunctions,
+    k_eigenvalues=FM_k_eigenvalues,
     descriptor=FM_descriptors,
     landmarks=FM_landmarks,
     compute_physic_fields=compute_physic_fields, 
@@ -115,5 +117,20 @@ visualize_reeb_graphs(mesh_path, reeb_path)
 ####################################################################################################### Functional Map Visualizer Launcher  #################################################################################################################################
 print('Multi-Physics Mapping visualizations...') 
 visualize_physics(mesh_path, matrix_path, on_time=False)
+
+###########################################################################################################################################################################################################################################################################
+
+####################################################################################################### Paths reference list ##########################################################################################################################################
+
+from PynamicMesh.utils.batch import run_batch
+from PynamicMesh.utils.tools import extract_yaml
+
+config_path = '/PynamicMesh/examples/config_batch.yaml' # vlinux
+config_path = r'\PynamicMesh\examples\config_batch.yaml' # windows
+
+config = extract_yaml(config_path)
+data_cfg = config.get("Data", {})
+path_str = data_cfg.get("path_str")
+run_batch(config,path_str)
 
 ###########################################################################################################################################################################################################################################################################

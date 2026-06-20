@@ -1,11 +1,12 @@
 Data:
-  path_str: './PynamicMesh/Mesh_models'
+  path_str: './Mesh_models'
 
 Functional_Map:
   matrix_tranformation: True
   diagonal_analysis: True
   isometric_analysis: True
-  k_eigenfunc: 100
+  k_eigenfunctions: (10,10)
+  k_eigenvalues: 100
   descriptor: 'WKS+HKS'
   landmarks: 'precomputed'
   compute_physic_fields: True

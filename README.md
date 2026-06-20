@@ -183,7 +183,8 @@ run_pipeline(
     matrix_tranformation=True,
     diagonal_analysis=True,
     isometric_analysis=True,
-    k_eigenfunc=100,
+    k_eigenfunctions=(10,10),
+    k_eigenvalues=100,
     descriptor='WKS+HKS',
     landmarks='precomputed',
     compute_physic_fields=True,
@@ -230,10 +231,16 @@ Energy function used on the pipeline: WKS (wave propagation kernel), HKS (heat d
 descriptor (str): 'HKS' | 'WKS' | 'WKS+HKS'
 ``` 
     
-Number of eigenfunctions used on the matrix computation matrix of size $k_\text{eigenfunc} \times k_\text{eigenfunc}$:
+Number of eigenfunctions used on the base matrix $k_\text{eigenfunction} \times k_\text{eigenfunction}$:
 ```python 
-k_eigenfunc (int)
-```     
+k_eigenfunctions (tuple) (int,int)
+```
+
+Number of low frecuence eigenvalues $\lambda_i$ taking into account:
+
+```python 
+k_eigenvalues (int) 
+```   
 
 Vertex indices indicators for symmetry restriction:
 ```python 
@@ -321,7 +328,7 @@ Let's run first the pipeline without landmarks to see the results.
 
 ```python
 from PynamicMesh.core.pipelines import run_pipeline
-run_pipeline(base_mesh_path, matrix_tranformation=True, descriptor='WKS+HKS', landmarks=None, k_eigenfunc=100)
+run_pipeline(base_mesh_path, matrix_tranformation=True, descriptor='WKS+HKS', landmarks=None, k_eigenfunctions=(10,10),k_eigenvalues=100)
 ```
 
 Compute the descriptors and visualize them with:
@@ -374,7 +381,7 @@ The used landmarks in these examples are provided [here](./examples/landmarks.np
 from PynamicMesh.core.pipelines import run_pipeline
 from PynamicMesh.core.physic_model import visualize_physics
 
-run_pipeline(base_mesh_path, matrix_tranformation=True, descriptor='WKS+HKS', landmarks='precomputed', k_eigenfunc=100)
+run_pipeline(base_mesh_path, matrix_tranformation=True, descriptor='WKS+HKS', landmarks='precomputed', k_eigenfunctions=(10,10),k_eigenvalues=100)
 visualize_physics("./PynamicMesh/Mesh_models/", "./PynamicMesh/Results/scene1/Transform_Matrices/", on_time=False)
 ```
 
@@ -890,3 +897,38 @@ This analysis allows us to automatically pinpoint exactly when and how your 3D m
 </details>
 </details>
 </details>
+
+<details>
+<summary><strong><span style="font-size:25px;">Batch Analysis Notes</span></strong></summary>
+
+The described methods on the previous sections allow us to configure specific sets of parameters for computing each mesh within a timelapse, or alternatively, to apply a consistent set of parameters across different timelapses. Naturally, it may be necessary to use unique parameter sets for distinct timelapses for instance, when applying different scalar fields for Reeb graphs for example or when processing timelapses of varying natures or sample types.
+
+To better organize and manage these multi-parameter configurations, it is possible to define a unique set of parameters for each timelapse within the [yaml](./examples/config_batch.yaml) configuration file and execute the following instruction within the conda environment.
+
+```python
+run_pynamic --config /path/to/the/config_batch.yaml  --batch
+```
+
+Or execute programatically as
+
+```python
+from PynamicMesh.utils.batch import run_batch
+from PynamicMesh.utils.tools import extract_yaml
+
+config_path = '\PynamicMesh\examples\config_batch.yaml'
+
+config = extract_yaml(config_path)
+data_cfg = config.get("Data", {})
+path_str = data_cfg.get("path_str")
+run_batch(config,path_str)
+```
+
+
+</details>
+
+
+
+
+<!-- <details>
+<summary><strong><span style="font-size:25px;">Functional Map</span></strong></summary>
+</details> -->

@@ -1,0 +1,40 @@
+
+# Root of the scene folder container
+Data:
+  path_str: './Mesh_models'
+
+################################################################### Individual params for each scene on the folder ####################################################################################################
+scene1:
+  Functional_Map:
+    matrix_tranformation: True
+    diagonal_analysis: True
+    isometric_analysis: True
+    k_eigenfunctions: (10,10)
+    k_eigenvalues: 100
+    descriptor: 'WKS+HKS'
+    landmarks: 'precomputed'
+    compute_physic_fields: True
+
+  Reeb_Graph:
+    compute_reeb: True
+    time_graph_analysis: True
+    reeb_scalar: 'geodesic'
+    bins: 30
+    scalar_args: 
+      vertex_ref_index: [4896]
+
+scene2:
+  Functional_Map:
+    matrix_tranformation: True
+    diagonal_analysis: True
+    isometric_analysis: True
+    k_eigenfunctions: (10,10)
+    k_eigenvalues: 100
+    descriptor: 'WKS+HKS'
+    compute_physic_fields: True
+
+  Reeb_Graph:
+    compute_reeb: True
+    time_graph_analysis: True
+    reeb_scalar: 'x'
+    bins: 5
