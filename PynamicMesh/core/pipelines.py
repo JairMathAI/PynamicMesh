@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import pyvista as pv  # Added to execute the spatial alignment mathematically
 from pathlib import Path
 from tqdm.auto import tqdm
 from PynamicMesh.core.custom_fm import CustomFunctionalMapping, pick_single_mesh
@@ -26,6 +27,22 @@ from PynamicMesh.utils.tools import (
     resolve_scalar_args,
     optimize_param
 )  
+
+def load_aligned_mesh(filepath):
+    """
+    Loads the mesh and applies the display alignment rotations natively.
+    Creates a new TriMesh instance to safely bypass read-only property constraints.
+    """
+
+    tm_raw = TriMesh(str(filepath))
+    
+    mesh_pv = pv.PolyData(tm_raw.vertices)
+    mesh_pv.rotate_x(90, inplace=True)
+    mesh_pv.rotate_z(90, inplace=True)
+    
+    tm_aligned = TriMesh(mesh_pv.points, tm_raw.faces)
+    
+    return tm_aligned
 
 def compute_FM(meshn_1, meshn, i, target_folder, descriptor, current_landmarks, k_eigenvalues,k_eigenfunctions, prev_FM_zo, inertia_history, decay_history, cdf_history, similarity_history, heatmap_paths, diagonal_analysis, isometric_analysis):
     os.makedirs(target_folder / 'Transform_Matrices', exist_ok=True)
@@ -129,7 +146,8 @@ def process_sequence(folder, path, matrix_tranformation, diagonal_analysis, isom
         elif reeb_scalar == 'harmonic' and source_idx == 'precomputed':
             loaded_selections_rg = landmark_load(source_idx, target_folder, reeb_scalar)
 
-    meshn_1 = TriMesh(str(obj_files[0]))
+    # Use the aligned mesh loader
+    meshn_1 = load_aligned_mesh(obj_files[0])
     if needs_spectral_processing:
         meshn_1.process(k=k_eigenvalues)
 
@@ -144,7 +162,8 @@ def process_sequence(folder, path, matrix_tranformation, diagonal_analysis, isom
     prev_FM_zo = None  
     
     for i in tqdm(range(1, len(obj_files)), desc=f'processing {scene_name}', leave=False):
-        meshn = TriMesh(str(obj_files[i]))
+        # Use the aligned mesh loader
+        meshn = load_aligned_mesh(obj_files[i])
         p2p_zo = None
         
         if needs_spectral_processing: 
@@ -167,7 +186,6 @@ def process_sequence(folder, path, matrix_tranformation, diagonal_analysis, isom
 
     if matrix_tranformation and heatmap_paths:
         headmap_gif(heatmap_paths, target_folder)
-
 
     if compute_physic_fields:
         if not matrix_tranformation:
@@ -225,7 +243,6 @@ def run_pipeline(path_str, is_batch=False, batch_kwargs=None, **kwargs):
             k: v for k, v in current_params.items() 
             if k not in process_seq_keys and k != 'time_graph_analysis'
         }
-
 
         FM_out_path, RG_out_path = process_sequence(
             folder=folder,
