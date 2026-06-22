@@ -48,8 +48,8 @@ For a detailed and applied understanding of meshes as Manifolds and triangulatio
 The functional map $(\mathscr{FM})$ allows us to compute a matrix representation $C$ of an unknown transformation function between meshes with whatever amount of vertices and a vector $v$ thar represent the vertex to vertex or the region to region transformation over the mesh.
 
 <div style="display: flex; flex-direction: row; justify-content: center; align-items: center; gap: 10px; flex-wrap: wrap;">
-  <img src="./assets/FM_mat.PNG" style="max-width: 20%; height: auto;"/>
-  <img src="./assets/FM_vec.PNG" style="max-width: 20%; height: auto;"/>
+  <img src="./assets/FM_mat.PNG" style="max-width: 20%; height: 20%;"/>
+  <img src="./assets/FM_vec.PNG" style="max-width: 20%; height: 20%;"/>
 </div>
 
 In order to understand the dynamics of the deformation we can compute this matrix and vector in every time step $t_i$
