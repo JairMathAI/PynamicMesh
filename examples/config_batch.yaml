@@ -5,6 +5,11 @@ Data:
 
 ################################################################### Individual params for each scene on the folder ####################################################################################################
 scene1:
+  Basic_Geometry:
+    compute_basicGeo: True
+    plot_basicGeo: True
+    metrics: 'all'
+
   Functional_Map:
     matrix_tranformation: True
     diagonal_analysis: True
@@ -24,6 +29,11 @@ scene1:
       vertex_ref_index: [4896]
 
 scene2:
+  Basic_Geometry:
+    compute_basicGeo: True
+    plot_basicGeo: True
+    metrics: 'all'
+
   Functional_Map:
     matrix_tranformation: True
     diagonal_analysis: True
@@ -36,5 +46,5 @@ scene2:
   Reeb_Graph:
     compute_reeb: True
     time_graph_analysis: True
-    reeb_scalar: 'y'
+    reeb_scalar: 'x'
     bins: 5

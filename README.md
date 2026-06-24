@@ -16,10 +16,15 @@ Clone the repo and install dependencies:
 git clone https://github.com/MMV-Lab/PynamicMesh
 cd PynamicMesh
 
+# Instalation with only CPU support
 pip install .
 
-# editable mood for developers
+# Instalation with GPU support depend in your drivers options
+pip install ".[gpu-12x]"
+pip install ".[gpu-13x]"
+pip install ".[rocm-7-0]"
 
+# Instalation with editable mood for developers
 pip install -e .
 ```
 
@@ -38,6 +43,97 @@ Given a family of meshes $\mathscr{M} = \{ M_{t_i} | 0 \leqslant i \leqslant T \
 PynamicMesh offers a full general range of pipelines based on Topology, Differential Geometry, and Physics in order to model the complex dynamics encoded in the transformation, allowing the extraction of features that help to characterize and understand the dynamical process.
 
 For a detailed and applied understanding of meshes as Manifolds and triangulations, the following [Jupyter Notebook](https://github.com/JairMathAI/Understanding_Persistent_Homology/blob/main/Persistent_Homology.ipynb) might interest you.
+
+<details>
+<summary><strong><span style="font-size:25px;">Global Geometry</span></strong></summary>
+
+This Basic analysis offer a time tracking of the global geometry features of the mesh.
+
+Generatibg a csv with the metric values and the plot of each one.
+
+```python
+from PynamicMesh.core.pipelines import run_pipeline
+run_pipeline(**args)
+```
+
+In order to track the Global Geometry, run:
+
+```python
+from PynamicMesh.core.pipelines import run_pipeline
+run_pipeline(
+    path_str='base/path'
+    compute_basicGeo = True,
+    metrics = 'all',
+    plot_basicGeo = True
+    )
+```
+
+Or you can set your parameters on the [yaml](./examples/config.yaml) file, and within the PynamicMesh enviroment run on the comand line:
+
+```python
+run_pynamic --config /path/to/the/config.yaml
+```
+<img src="./assets/global_geom.png" style="max-width: 50%; height: auto; display: block; margin: 0 auto;"/>
+
+<details>
+<summary><span style="font-size:23px;">Global Geometry Parameters</span></summary>
+
+Path to the root folder that contains the scenes:
+```python 
+path_str (str) 
+```   
+
+Flag to indicate the execution:
+```python 
+compute_basicGeo (bool)
+```  
+
+Flag to indicate the plot of the metrics:
+```python 
+plot_basicGeo (bool)
+```
+
+Desired metrics to track:
+```python 
+metrics (str) | (list)
+```
+<details>
+<summary><span style="font-size:21px;">Available metrics</span></summary>
+
+Compute and report all the available metrics :
+
+```python 
+metrics (str) : 'all'
+```
+
+Compute just the selected set of metrics :
+
+```python 
+metrics (list) : ['metric_1',...,'metric_n']
+```
+
+
+Mesh Detail : ```n_vertices``` and  ```n_faces```  captures the structural resolution of the mesh (the total number of points and connecting triangles), constant values mean the object is changing shape or moving without altering its basic blueprint. 
+Changing values mean the model is actively gaining or losing detail (e.g., tearing, merging, or adaptive rewriting).
+
+Surface Area ```area``` captures the total amount of  outside covering for the mesh, tracks stretching and compression. If the surface area spikes while the overall size remains constant, it indicates that the object is wrinkling, crumpling, or becoming highly textured.
+
+Volume ```volume```  captures the total relative amount of physical space enclosed inside the object, tracks inflation and deflation. A steady volume means the object is maintaining its physical mass/size while it moves or bends.
+
+Sphericity ```phericity``` captures the roundness score from 0 to 1, evaluating how closely the object resembles a perfect ball (1 being a perfect sphere).  A rising score means the object is compacting or pulling itself together into a ball shape. 
+A falling score means it is stretching out, flattening, or growing irregular limbs.
+
+Convexity ```convexity```  captures a "bulginess" score measuring how many hollows, indents, or valleys the object has.  A high score indicates a smooth, rounded object. A decreasing score means the object is actively folding in on itself, developing deep cavities, or sprouting appendages.
+
+Surface Curvature ```mean_gaussian_curvature```  captures the average texture profile of the surface, distinguishing between dome-like features and saddle-like curves.
+Serves as a global bumpiness tracker. Rapid fluctuations indicate that the smooth skin of the object is rapidly turning wavy, creased, or jagged.
+
+Relative Movement Speed ```center_mass``` captures the straight-line distance traveled by the object's center of gravity from one time frame to the next. Tracks overall speed. A flat line near zero means the object is stationary (even if it is spinning or shaking in place).
+Sudden spikes indicate a sudden leap or fast global movement across space.
+
+</details>
+</details>
+</details>
 
 <details>
 <summary><strong><span style="font-size:25px;">Functional Map</span></strong></summary>
@@ -648,6 +744,11 @@ reeb_scalar="normal_displacement"
 
 ```python 
 reeb_scalar="lb_eigen_n" 
+```
+<b>Geodesic path to the center of mass:</b> 
+
+```python 
+reeb_scalar="mass_center_geodesic"
 ```
 
 <b>Multi scalar field maps combination through Mapper Lens construction (PCA feature extraction):</b> 
