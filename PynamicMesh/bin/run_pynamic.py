@@ -54,7 +54,8 @@ def main():
             
             fm_cfg = config.get("Functional_Map", {})
             rg_cfg = config.get("Reeb_Graph", {})
-            global_kwargs = extract_kwargs(fm_cfg, rg_cfg)
+            bg_cfg = config.get("Basic_Geometry", {})
+            global_kwargs = extract_kwargs(fm_cfg, rg_cfg,bg_cfg)
             run_pipeline(path_str=path_str, is_batch=False, **global_kwargs)
         print("Pipeline execution completed successfully.")
     except Exception as e:

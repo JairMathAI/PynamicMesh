@@ -9,7 +9,7 @@ import seaborn as sns
 import networkx as nx
 import pickle
 from scipy.sparse.csgraph import connected_components
-from scipy.sparse import coo_matrix, csgraph
+from scipy.sparse import coo_matrix 
 from scipy.sparse import linalg as splinalg
 from sklearn.decomposition import PCA
 import pandas as pd
@@ -17,6 +17,29 @@ from scipy.stats import wasserstein_distance
 from scipy.linalg import eigvalsh
 import warnings
 import copy
+from PynamicMesh.utils.tools import  mesh_mat2object
+
+try:
+    import cupy as xp
+    GPU_AVAILABLE = True
+    print("[INFO] CuPy detected. Utilizing GPU for Reeb Graph spectral computations and scalar fields.")
+except ImportError:
+    xp = np
+    GPU_AVAILABLE = False
+    print("[INFO] CuPy not found. Defaulting to CPU (NumPy).")
+
+def to_gpu(arr):
+    """Moves a numpy array to the GPU if available."""
+    if GPU_AVAILABLE and isinstance(arr, np.ndarray):
+        return xp.asarray(arr)
+    return arr
+
+def to_cpu(arr):
+    """Moves a CuPy array back to the CPU for NetworkX/PyVista/Saving."""
+    if GPU_AVAILABLE and hasattr(arr, 'get'):
+        return arr.get()
+    return arr
+
 
 def edit_graph(mesh_folder_path, reeb_folder_path):
     print("\nStarting Interactive Split-Screen Graph Editor with Undo...")
@@ -28,7 +51,7 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
         print("Error: Invalid mesh or reeb graph directory paths.")
         return
 
-    obj_files = sorted([f for f in mesh_path.iterdir() if f.is_file() and f.suffix == '.obj'])
+    obj_files = sorted([f for f in mesh_path.iterdir() if f.is_file() and (f.suffix == '.obj' or f.suffix == '.mat')])
     reeb_files = sorted([f for f in reeb_path.iterdir() if f.is_file() and f.suffix == '.pkl'])
     scalar_files = sorted([f for f in reeb_path.iterdir() if f.is_file() and f.name.startswith('Scalar') and f.suffix == '.npy'])
     
@@ -87,7 +110,7 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
         return node_data
 
     def update_frame(frame_idx):
-        tm = TriMesh(str(obj_files[frame_idx]))
+        tm = mesh_mat2object(obj_files[frame_idx]) 
         pad = np.full((tm.faces.shape[0], 1), 3, dtype=np.int64)
         pv_faces = np.hstack((pad, tm.faces)).flatten()
         mesh_pv = pv.PolyData(tm.vertices, pv_faces)
@@ -387,11 +410,7 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
     else:
         print(f"[SUCCESS] Exported {saved_count} updated topological structures to: {target_folder}")
 
-def graph_time_analysis(reeb_folder_path,single_file=True):
-    """
-    Analyzes the temporal evolution of Reeb graphs and extracts a robust set 
-    of topological and distance features between consecutive timesteps.
-    """
+def graph_time_analysis(reeb_folder_path, single_file=True):
     if single_file:
         print("\nStarting Dynamic Graph Analysis...")
     reeb_folder = Path(reeb_folder_path)
@@ -406,7 +425,6 @@ def graph_time_analysis(reeb_folder_path,single_file=True):
     
     features_list = []
     
-    # Load first graph
     with open(reeb_files[0], 'rb') as f:
         G_prev = pickle.load(f)
 
@@ -414,17 +432,14 @@ def graph_time_analysis(reeb_folder_path,single_file=True):
         with open(reeb_files[i], 'rb') as f:
             G_curr = pickle.load(f)
             
-        # Basic Graph Sizes
         v_prev, e_prev = G_prev.number_of_nodes(), G_prev.number_of_edges()
         v_curr, e_curr = G_curr.number_of_nodes(), G_curr.number_of_edges()
         
-        # Betti-1 Number (Cycles): E - V + C
         c_prev = nx.number_connected_components(G_prev) if v_prev > 0 else 0
         c_curr = nx.number_connected_components(G_curr) if v_curr > 0 else 0
         betti_prev = e_prev - v_prev + c_prev
         betti_curr = e_curr - v_curr + c_curr
         
-        # Diameter & Radius of the Largest Connected Component
         if v_curr > 0 and c_curr > 0:
             largest_cc = max(nx.connected_components(G_curr), key=len)
             sub_G = G_curr.subgraph(largest_cc)
@@ -433,37 +448,34 @@ def graph_time_analysis(reeb_folder_path,single_file=True):
         else:
             diameter, radius = 0, 0
             
-        # Degree Distribution
         degrees_prev = [d for n, d in G_prev.degree()] if v_prev > 0 else [0]
         degrees_curr = [d for n, d in G_curr.degree()] if v_curr > 0 else [0]
         
-        # --- Similarity & Distance Metrics ---
-        
-        # 1. Degree Wasserstein Distance (Earth Mover's Distance)
         deg_wasserstein = wasserstein_distance(degrees_prev, degrees_curr)
         
-        # 2. Spectral Distance (L2 norm of Normalized Laplacian Eigenvalues differences)
+        # --- GPU-Accelerated Dense Spectral Laplacian distance ---
         if v_prev > 0 and v_curr > 0:
-            lap_prev = nx.normalized_laplacian_matrix(G_prev).todense()
-            lap_curr = nx.normalized_laplacian_matrix(G_curr).todense()
-            evals_prev = eigvalsh(lap_prev)
-            evals_curr = eigvalsh(lap_curr)
+            lap_prev_np = np.asarray(nx.normalized_laplacian_matrix(G_prev).todense())
+            lap_curr_np = np.asarray(nx.normalized_laplacian_matrix(G_curr).todense())
             
-            # Pad the smaller eigenvalue array with zeros for direct comparison
+            lap_prev_gpu = to_gpu(lap_prev_np)
+            lap_curr_gpu = to_gpu(lap_curr_np)
+            
+            evals_prev = xp.linalg.eigvalsh(lap_prev_gpu)
+            evals_curr = xp.linalg.eigvalsh(lap_curr_gpu)
+            
             max_len = max(len(evals_prev), len(evals_curr))
-            e_p_pad = np.pad(evals_prev, (0, max_len - len(evals_prev)))
-            e_c_pad = np.pad(evals_curr, (0, max_len - len(evals_curr)))
-            spectral_dist = np.linalg.norm(e_p_pad - e_c_pad)
+            e_p_pad = xp.pad(evals_prev, (0, max_len - len(evals_prev)))
+            e_c_pad = xp.pad(evals_curr, (0, max_len - len(evals_curr)))
+            
+            spectral_dist = float(to_cpu(xp.linalg.norm(e_p_pad - e_c_pad)))
         else:
             spectral_dist = 0.0
 
-        # 3. Approximate Graph Edit Distance (GED)
-        # Bounded to 2 seconds to prevent hanging on dense topological structures
         ged = nx.graph_edit_distance(G_prev, G_curr, timeout=2)
-        if ged is None:  # If it timed out, default to a structural proxy
+        if ged is None:  
             ged = abs(v_curr - v_prev) + abs(e_curr - e_prev)
 
-        # Append feature vector
         features_list.append({
             'Transition': f"T{i-1} -> T{i}",
             'Time_Step': i-1,
@@ -482,7 +494,6 @@ def graph_time_analysis(reeb_folder_path,single_file=True):
         
         G_prev = G_curr
 
-    # Save to CSV
     df = pd.DataFrame(features_list)
     csv_out_path = analysis_folder / 'time_analysis.csv'
     df.to_csv(csv_out_path, index=False)
@@ -571,20 +582,23 @@ def plot_dynamic_graph_analysis(csv_path,single_file=True):
 
 
 def _get_mesh_adjacency(vertices, faces):
-    """Constructs a sparse adjacency matrix weighted by Euclidean edge lengths."""
-    edges = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
-    weights = np.linalg.norm(vertices[edges[:, 0]] - vertices[edges[:, 1]], axis=1)
+    """Constructs a sparse adjacency matrix optimized on the GPU."""
+    v_gpu = to_gpu(vertices)
+    f_gpu = to_gpu(faces)
+    
+    edges_gpu = xp.vstack([f_gpu[:, [0, 1]], f_gpu[:, [1, 2]], f_gpu[:, [2, 0]]])
+    weights_gpu = xp.linalg.norm(v_gpu[edges_gpu[:, 0]] - v_gpu[edges_gpu[:, 1]], axis=1)
+    
+    edges = to_cpu(edges_gpu)
+    weights = to_cpu(weights_gpu)
+    
     n = len(vertices)
     adj = coo_matrix((weights, (edges[:, 0], edges[:, 1])), shape=(n, n))
     return adj.maximum(adj.T)
 
 def compute_geodesic_distance(vertices, faces, vertex_ref_index):
-    """Computes the shortest path geodesic distance to a set of landmark vertices."""
-    adj = _get_mesh_adjacency(vertices, faces)
-    # Dijkstra from all landmarks, returning the minimum distance to the closest one
-    dist_matrix = csgraph.dijkstra(adj, indices=vertex_ref_index, directed=False)
-    if dist_matrix.ndim > 1:
-        return np.min(dist_matrix, axis=0)
+    # TriMesh requires standard numpy arrays on CPU host memory
+    dist_matrix = TriMesh(to_cpu(vertices), to_cpu(faces)).geod_from(vertex_ref_index)
     return dist_matrix
 
 def compute_harmonic_field(trimesh_obj, source_idx, sink_idx):
@@ -609,41 +623,50 @@ def compute_harmonic_field(trimesh_obj, source_idx, sink_idx):
     return f
 
 def compute_heat_diffusion(trimesh_obj, source_idx, t=10.0):
-    """Approximates the heat kernel signature using LBO eigenfunctions."""
-    evals = trimesh_obj.eigenvalues
-    evecs = trimesh_obj.eigenvectors
+    """Fully vectorized and parallelized GPU calculation of the Heat Kernel Signature."""
+    evals_gpu = to_gpu(trimesh_obj.eigenvalues)
+    evecs_gpu = to_gpu(trimesh_obj.eigenvectors)
     
-    heat = np.zeros(evecs.shape[0])
-    for i in range(len(evals)):
-        # H_t(x, y) ≈ sum exp(-t * lambda_i) * phi_i(x) * phi_i(y)
-        heat += np.exp(-t * evals[i]) * evecs[:, i] * evecs[source_idx, i]
-    return heat
+    # Computes weights for all eigenfunctions inside a single unified matrix-vector product
+    weights = xp.exp(-t * evals_gpu) * evecs_gpu[source_idx, :]
+    heat_gpu = evecs_gpu @ weights
+    
+    return to_cpu(heat_gpu)
 
-def get_scalar_field(vertices, faces, method="z", prev_vertices=None, p2p=None, 
-                     trimesh_obj=None, **kwargs):
-    """
-    Computes a specified scalar field dynamically for Reeb graph extraction.
-    Supports geometric, spectral, and multi-scalar Mapper-type fields.
-    """
+def get_scalar_field(vertices, faces, method="z", prev_vertices=None, p2p=None, trimesh_obj=None, **kwargs):
     method = method.lower()
-    centroid = vertices.mean(axis=0)
     num_vertices = vertices.shape[0]
     
-    # --- Standard Geometric & Coordinate Fields ---
-    if method == "x": return vertices[:, 0]
-    elif method == "y": return vertices[:, 1]
-    elif method == "z": return vertices[:, 2]
-    elif method == "dist_centroid": return np.linalg.norm(vertices - centroid, axis=1)
-    elif method == "signed_dist_x": return vertices[:, 0] - centroid[0]
-    elif method == "signed_dist_y": return vertices[:, 1] - centroid[1]
-    elif method == "signed_dist_z": return vertices[:, 2] - centroid[2]
+    # Move coordinate arrays to GPU for unified operations
+    v_gpu = to_gpu(vertices)
     
-    # --- Local Surface Metrics (Curvatures) ---
+    # --- Standard Geometric & Coordinate Fields ---
+    if method == "x": return to_cpu(v_gpu[:, 0])
+    elif method == "y": return to_cpu(v_gpu[:, 1])
+    elif method == "z": return to_cpu(v_gpu[:, 2])
+    elif method == "dist_centroid": 
+        centroid = v_gpu.mean(axis=0)
+        return to_cpu(xp.linalg.norm(v_gpu - centroid, axis=1))
+    elif method == "signed_dist_x": return to_cpu(v_gpu[:, 0] - v_gpu.mean(axis=0)[0])
+    elif method == "signed_dist_y": return to_cpu(v_gpu[:, 1] - v_gpu.mean(axis=0)[1])
+    elif method == "signed_dist_z": return to_cpu(v_gpu[:, 2] - v_gpu.mean(axis=0)[2])
+
+    elif method == "mass_center_geodesic":
+        vertices_cpu = to_cpu(vertices)
+        faces_cpu = to_cpu(faces)
+        center = TriMesh(vertices_cpu, faces_cpu).center_mass
+        dist_to_center = np.linalg.norm(vertices_cpu - center, axis=1)
+        central_vertex_idx = np.argmin(dist_to_center)
+        return compute_geodesic_distance(vertices_cpu, faces_cpu, [central_vertex_idx])
+    
+    # --- Local Surface Metrics (Curvatures using CPU-bound PyVista) ---
     elif method in ["mean_curvature", "gaussian_curvature", "shape_index", "curvedness"]:
-        faces_pv = np.empty((faces.shape[0], 4), dtype=int)
+        vertices_cpu = to_cpu(vertices)
+        faces_cpu = to_cpu(faces)
+        faces_pv = np.empty((faces_cpu.shape[0], 4), dtype=int)
         faces_pv[:, 0] = 3
-        faces_pv[:, 1:] = faces
-        mesh_pv = pv.PolyData(vertices, faces_pv.flatten())
+        faces_pv[:, 1:] = faces_cpu
+        mesh_pv = pv.PolyData(vertices_cpu, faces_pv.flatten())
         
         if method == "mean_curvature":
             return np.nan_to_num(mesh_pv.curvature(curv_type="mean"))
@@ -652,69 +675,64 @@ def get_scalar_field(vertices, faces, method="z", prev_vertices=None, p2p=None,
         else:
             H = np.nan_to_num(mesh_pv.curvature(curv_type="mean"))
             K = np.nan_to_num(mesh_pv.curvature(curv_type="Gaussian"))
-            
-            # Discriminant for principal curvatures: H^2 - K
             discriminant = np.maximum(H**2 - K, 1e-8) 
             
             if method == "shape_index":
                 S = (2.0 / np.pi) * np.arctan(H / np.sqrt(discriminant))
                 return np.nan_to_num(S)
             elif method == "curvedness":
-                # C = sqrt( (k1^2 + k2^2) / 2 ) = sqrt( 2H^2 - K )
                 C = np.sqrt(np.maximum(2 * H**2 - K, 0))
                 return np.nan_to_num(C)
 
     # --- Displacement Flow ---
     elif method == "normal_displacement":
         if prev_vertices is None or p2p is None: return np.zeros(num_vertices)
-        matched_prev = prev_vertices[p2p]
-        displacements = vertices - matched_prev
-        norm_mag, _ = compute_flow_decomposition(vertices, faces, displacements)
+        matched_prev = to_cpu(prev_vertices)[to_cpu(p2p)]
+        displacements = to_cpu(vertices) - matched_prev
+        from physic_model import compute_flow_decomposition  # dynamic reference to flow solver
+        norm_mag, _ = compute_flow_decomposition(to_cpu(vertices), to_cpu(faces), displacements)
         return norm_mag
 
     # --- Geodesic Distance ---
     elif method == "geodesic":
-        vertex_ref_index = kwargs.get("vertex_ref_index", [0]) # Default to vertex 0 if none provided
-        return compute_geodesic_distance(vertices, faces, vertex_ref_index)
+        vertex_ref_index = kwargs.get("vertex_ref_index", [0])
+        return compute_geodesic_distance(to_cpu(vertices), to_cpu(faces), vertex_ref_index)
 
-    # --- Spectral Methods (Requires trimesh_obj) ---
+    # --- Spectral Methods ---
     elif method.startswith("lb_eigen_"):
         if trimesh_obj is None: raise ValueError("trimesh_obj is required for LB eigenfunctions.")
         idx = int(method.split("_")[-1])
         return trimesh_obj.eigenvectors[:, idx]
         
-
     elif method == "heat_diffusion":
         if trimesh_obj is None: raise ValueError("trimesh_obj is required for heat diffusion.")
         source_idx = kwargs.get("source_idx", 0)
         t = kwargs.get("t", 10.0)
+        
         heat_raw = compute_heat_diffusion(trimesh_obj, source_idx, t)
         
         if kwargs.get("equalize_histogram", True):
-            temp = heat_raw.argsort()
-            ranks = np.empty_like(temp)
-            ranks[temp] = np.arange(len(heat_raw))
-            heat_normalized = ranks / (len(heat_raw) - 1.0)
-            return heat_normalized
+            heat_gpu = to_gpu(heat_raw)
+            temp = heat_gpu.argsort()
+            ranks = xp.empty_like(temp)
+            ranks[temp] = xp.arange(len(heat_gpu))
+            heat_normalized = ranks / (len(heat_gpu) - 1.0)
+            return to_cpu(heat_normalized)
             
         return heat_raw
 
     elif method == "harmonic":
         if trimesh_obj is None: raise ValueError("trimesh_obj is required for harmonic fields.")
-        # Default: harmonic field between furthest points
-        source_idx = kwargs.get("source_idx", np.argmin(vertices[:, 2])) 
-        sink_idx = kwargs.get("sink_idx", np.argmax(vertices[:, 2]))
-
+        vertices_cpu = to_cpu(vertices)
+        source_idx = kwargs.get("source_idx", np.argmin(vertices_cpu[:, 2])) 
+        sink_idx = kwargs.get("sink_idx", np.argmax(vertices_cpu[:, 2]))
         return compute_harmonic_field(trimesh_obj, source_idx, sink_idx)
 
     elif method == "multi_pca":
-        # Extracts 1st Principal Component from multiple fields to create a 1D Mapper lens
         fields = kwargs.get("fields", ["z", "mean_curvature", "gaussian_curvature"])
         stacked_features = []
         for f in fields:
-            # Recursively call get_scalar_field for each feature
-            val = get_scalar_field(vertices, faces, method=f, trimesh_obj=trimesh_obj, **kwargs)
-            # Normalize to avoid dominance of large scales
+            val = get_scalar_field(to_cpu(vertices), to_cpu(faces), method=f, trimesh_obj=trimesh_obj, **kwargs)
             val = (val - np.mean(val)) / (np.std(val) + 1e-8)
             stacked_features.append(val)
             
@@ -726,12 +744,17 @@ def get_scalar_field(vertices, faces, method="z", prev_vertices=None, p2p=None,
         raise ValueError(f"Unknown scalar field method: {method}")
 
 def compute_approx_reeb_graph(vertices, faces, scalar_field, num_bins=20):
-    f_min, f_max = scalar_field.min(), scalar_field.max()
+    # Ensure inputs are safely mapped to CPU NumPy space for standard NetworkX graph construction
+    v_cpu = to_cpu(vertices)
+    f_cpu = to_cpu(faces)
+    sf_cpu = to_cpu(scalar_field)
+    
+    f_min, f_max = sf_cpu.min(), sf_cpu.max()
     bins = np.linspace(f_min, f_max + 1e-8, num_bins + 1)
-    bin_indices = np.digitize(scalar_field, bins) - 1
+    bin_indices = np.digitize(sf_cpu, bins) - 1
     
     edges = set()
-    for face in faces:
+    for face in f_cpu:
         for i in range(3):
             u, v = face[i], face[(i+1)%3]
             edges.add((min(u, v), max(u, v)))
@@ -751,8 +774,7 @@ def compute_approx_reeb_graph(vertices, faces, scalar_field, num_bins=20):
         
         if local_edges:
             local_edges = np.array(local_edges)
-            adj = coo_matrix((np.ones(len(local_edges)), (local_edges[:,0], local_edges[:,1])), 
-                             shape=(len(v_in_bin), len(v_in_bin)))
+            adj = coo_matrix((np.ones(len(local_edges)), (local_edges[:,0], local_edges[:,1])), shape=(len(v_in_bin), len(v_in_bin)))
             adj = adj.maximum(adj.T)
             n_components, labels = connected_components(adj, directed=False)
         else:
@@ -761,7 +783,7 @@ def compute_approx_reeb_graph(vertices, faces, scalar_field, num_bins=20):
             
         for comp in range(n_components):
             comp_vertices = v_in_bin[labels == comp]
-            center_pos = vertices[comp_vertices].mean(axis=0)
+            center_pos = v_cpu[comp_vertices].mean(axis=0)
             
             graph.add_node(node_id_counter, pos=center_pos, bin=b)
             for v in comp_vertices:
@@ -807,7 +829,7 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files):
     pl.camera_position = 'iso'
     
     def update_frame(frame_idx):
-        tm = TriMesh(mesh_files[frame_idx])
+        tm = mesh_mat2object(mesh_files[frame_idx])
 
         faces_pv = np.empty((tm.faces.shape[0], 4), dtype=int)
         faces_pv[:, 0] = 3
@@ -886,7 +908,7 @@ def visualize_reeb_graphs(mesh_folder_path, reeb_folder_path):
     mesh_folder = Path(mesh_folder_path)
     reeb_folder = Path(reeb_folder_path)
     
-    obj_files = sorted([f for f in mesh_folder.iterdir() if f.is_file() and f.suffix == '.obj'])
+    obj_files = sorted([f for f in mesh_folder.iterdir() if f.is_file() and (f.suffix == '.obj' or f.suffix == '.mat')])
     reeb_files = sorted([f for f in reeb_folder.iterdir() if f.is_file() and f.suffix == '.pkl'])
     scalar_files = sorted([f for f in reeb_folder.iterdir() if f.is_file() and f.name.startswith('Scalar') and f.suffix == '.npy'])
     

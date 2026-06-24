@@ -4,13 +4,19 @@ import pyvista as pv
 import os
 from pathlib import Path
 from tqdm.auto import tqdm
-from pyFM.mesh import TriMesh
 import vtk
 import os
 import numpy as np
 import pyvista as pv
 from pathlib import Path
-from pyFM.mesh import TriMesh
+from PynamicMesh.utils.tools import  mesh_mat2object
+
+try:
+    import cupy as xp
+    GPU_AVAILABLE = True
+except ImportError:
+    import numpy as xp
+    GPU_AVAILABLE = False
 
 def visual_selection_edition(scene_folder_path, mood='FM'):
     """
@@ -28,7 +34,7 @@ def visual_selection_edition(scene_folder_path, mood='FM'):
         print(f"Error: The path '{scene_folder_path}' is not a valid directory.")
         return
 
-    obj_files = sorted([f for f in path.iterdir() if f.is_file() and f.suffix == '.obj'])
+    obj_files = sorted([f for f in path.iterdir() if f.is_file() and (f.suffix == '.obj' or f.suffix == '.mat')])
     if not obj_files:
         print(f"No .obj files found in {path}")
         return
@@ -155,7 +161,7 @@ def visual_selection_edition(scene_folder_path, mood='FM'):
             state['drawn_actors'].append(label_actor)
 
         def update_frame(frame_idx):
-            tm = TriMesh(str(obj_files[frame_idx]))
+            tm = mesh_mat2object(obj_files[frame_idx])
             pad = np.full((tm.faces.shape[0], 1), 3, dtype=np.int64)
             pv_faces = np.hstack((pad, tm.faces)).flatten()
             mesh_pv = pv.PolyData(tm.vertices, pv_faces)
@@ -240,7 +246,7 @@ def visual_selection_edition(scene_folder_path, mood='FM'):
             else:
                 if mood == 'harmonic':
                     # Load mesh to get total vertex count for max index
-                    tm = TriMesh(str(obj_files[i]))
+                    tm = mesh_mat2object(obj_files[i])
                     min_index = 0
                     max_index = tm.vertices.shape[0] - 1
                     saved_picks.append([min_index, max_index])
@@ -270,7 +276,7 @@ def precompute_landmarks(path_str, mood='FM'):
 
     for folder in tqdm(subdirectories, desc='Precomputing Folders'):
         itemsfiles = list(folder.iterdir())
-        obj_files = sorted([f for f in itemsfiles if f.is_file() and f.suffix == '.obj'])
+        obj_files = sorted([f for f in itemsfiles if f.is_file() and (f.suffix == '.obj' or f.suffix == '.mat')])
         if not obj_files:
             continue
             
@@ -295,10 +301,10 @@ def precompute_landmarks(path_str, mood='FM'):
                 continue
             all_transitions = []
             persisted_target_picks = None
-            meshn_1 = TriMesh(str(obj_files[0]))
+            meshn_1 = mesh_mat2object(obj_files[0])
             
             for i in range(1, len(obj_files)):
-                meshn = TriMesh(str(obj_files[i]))
+                meshn = mesh_mat2object(obj_files[i])
                 if i == 1 or persisted_target_picks is None:
                     source_picks = pick_single_mesh(meshn_1.vertices, meshn_1.faces, f"{scene_name} - Mesh {i-1} (Source)", marker_color="blue")
                 else:
@@ -344,7 +350,7 @@ def precompute_landmarks(path_str, mood='FM'):
                 all_selections.append([])
                 
             for i in range(len(obj_files)):
-                meshn = TriMesh(str(obj_files[i]))
+                meshn = mesh_mat2object(obj_files[i])
                 initial_picks = all_selections[i]
                 
                 while True:
@@ -382,7 +388,7 @@ def precompute_landmarks(path_str, mood='FM'):
                 else:
                     if mood == 'harmonic':
                         # Load mesh to get total vertex count for max index
-                        tm = TriMesh(str(obj_files[i]))
+                        tm = mesh_mat2object(obj_files[i])
                         min_index = 0
                         max_index = tm.vertices.shape[0] - 1
                         saved_selections.append([min_index, max_index])
@@ -532,11 +538,18 @@ class CustomFunctionalMapping(FunctionalMapping):
             descr1_hks = self.descr1.copy()
             descr2_hks = self.descr2.copy()
 
-            descr1_wks = (descr1_wks - descr1_wks.mean(axis=0)) / (descr1_wks.std(axis=0) + 1e-8)
-            descr2_wks = (descr2_wks - descr2_wks.mean(axis=0)) / (descr2_wks.std(axis=0) + 1e-8)
+            def normalize_descriptor(desc):
+                desc_gpu = xp.asarray(desc) if GPU_AVAILABLE else desc
+                mean = desc_gpu.mean(axis=0)
+                std = desc_gpu.std(axis=0) + 1e-8
+                norm_gpu = (desc_gpu - mean) / std
+                return norm_gpu.get() if GPU_AVAILABLE else norm_gpu
+
+            descr1_wks = normalize_descriptor(descr1_wks)
+            descr2_wks = normalize_descriptor(descr2_wks)
             
-            descr1_hks = (descr1_hks - descr1_hks.mean(axis=0)) / (descr1_hks.std(axis=0) + 1e-8)
-            descr2_hks = (descr2_hks - descr2_hks.mean(axis=0)) / (descr2_hks.std(axis=0) + 1e-8)
+            descr1_hks = normalize_descriptor(descr1_hks) 
+            descr2_hks = normalize_descriptor(descr2_hks)
 
             self._set_descriptors(
                 np.hstack([descr1_wks, descr1_hks]),

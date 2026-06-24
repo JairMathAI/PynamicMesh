@@ -24,6 +24,20 @@ dependencies = [
     "seaborn",
     "pyvista", 
     "pyyaml",
+    "trimesh",
+    "rtree",
+]
+
+
+[project.optional-dependencies]
+gpu-12x = [
+    "cupy-cuda12x",
+]
+gpu-13x = [
+    "cupy-cuda13x",
+]
+rocm-7-0 = [
+    "cupy-rocm-7-0",
 ]
 
 [project.urls]

@@ -1,6 +1,12 @@
 Data:
   path_str: './Mesh_models'
 
+
+Basic_Geometry:
+  compute_basicGeo: True
+  plot_basicGeo: True
+  metrics: 'all'
+
 Functional_Map:
   matrix_tranformation: True
   diagonal_analysis: True

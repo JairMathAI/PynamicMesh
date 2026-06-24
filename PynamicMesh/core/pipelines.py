@@ -1,12 +1,14 @@
 import os
 import numpy as np
-import pyvista as pv  # Added to execute the spatial alignment mathematically
+import pyvista as pv  
 from pathlib import Path
 from tqdm.auto import tqdm
+import pandas as pd
 from PynamicMesh.core.custom_fm import CustomFunctionalMapping, pick_single_mesh
 from pyFM.mesh import TriMesh
 from PIL import Image
 import pickle
+from PynamicMesh.core.basicGeometry import compute_mesh_geometry, generate_plots_from_csv
 from PynamicMesh.core.physic_model import (
     plot_diagonal, 
     generate_tranformation_heatmap, 
@@ -25,24 +27,10 @@ from PynamicMesh.utils.tools import (
     landmark_load, 
     landmark_parser, 
     resolve_scalar_args,
-    optimize_param
-)  
-
-def load_aligned_mesh(filepath):
-    """
-    Loads the mesh and applies the display alignment rotations natively.
-    Creates a new TriMesh instance to safely bypass read-only property constraints.
-    """
-
-    tm_raw = TriMesh(str(filepath))
-    
-    mesh_pv = pv.PolyData(tm_raw.vertices)
-    mesh_pv.rotate_x(90, inplace=True)
-    mesh_pv.rotate_z(90, inplace=True)
-    
-    tm_aligned = TriMesh(mesh_pv.points, tm_raw.faces)
-    
-    return tm_aligned
+    optimize_param,
+    mesh_mat2object,
+    load_aligned_mesh
+) 
 
 def compute_FM(meshn_1, meshn, i, target_folder, descriptor, current_landmarks, k_eigenvalues,k_eigenfunctions, prev_FM_zo, inertia_history, decay_history, cdf_history, similarity_history, heatmap_paths, diagonal_analysis, isometric_analysis):
     os.makedirs(target_folder / 'Transform_Matrices', exist_ok=True)
@@ -119,9 +107,9 @@ def headmap_gif(heatmap_paths, target_folder):
     frames[0].save(gif_path, format='GIF', append_images=frames[1:], save_all=True, duration=700, loop=0)
 
 
-def process_sequence(folder, path, matrix_tranformation, diagonal_analysis, isometric_analysis, k_eigenvalues,k_eigenfunctions, descriptor, landmarks, compute_reeb, reeb_scalar, bins, needs_spectral_processing, compute_physic_fields, scalar_kwargs):
+def process_sequence(folder, path,compute_basicGeo ,plot_basicGeo, metrics, matrix_tranformation, diagonal_analysis, isometric_analysis, k_eigenvalues,k_eigenfunctions, descriptor, landmarks, compute_reeb, reeb_scalar, bins, needs_spectral_processing, compute_physic_fields, scalar_kwargs):
     itemsfiles = list(folder.iterdir())
-    obj_files = sorted([f for f in itemsfiles if f.is_file() and f.suffix == '.obj'])
+    obj_files = sorted([f for f in itemsfiles if f.is_file() and (f.suffix == '.obj' or f.suffix == '.mat')])
     
     if len(obj_files) < 2:
         return None, None
@@ -148,11 +136,19 @@ def process_sequence(folder, path, matrix_tranformation, diagonal_analysis, isom
 
     # Use the aligned mesh loader
     meshn_1 = load_aligned_mesh(obj_files[0])
+
     if needs_spectral_processing:
         meshn_1.process(k=k_eigenvalues)
 
     if compute_reeb:
         compute_RG(meshn_1, 0, reeb_scalar, bins, scalar_kwargs, target_folder, loaded_selections_rg, needs_spectral_processing)
+    
+    if compute_basicGeo:
+        geom_path = target_folder / 'Basic_Geometry'
+        os.makedirs(geom_path, exist_ok=True)
+        computed_metrics = []
+        metrics_dict = compute_mesh_geometry(meshn_1, metrics=metrics)
+        computed_metrics.append(metrics_dict)
 
     inertia_history, decay_history, cdf_history = [], [], []
     similarity_history = []  
@@ -162,10 +158,11 @@ def process_sequence(folder, path, matrix_tranformation, diagonal_analysis, isom
     prev_FM_zo = None  
     
     for i in tqdm(range(1, len(obj_files)), desc=f'processing {scene_name}', leave=False):
+
         # Use the aligned mesh loader
         meshn = load_aligned_mesh(obj_files[i])
         p2p_zo = None
-        
+
         if needs_spectral_processing: 
             meshn.process(k=k_eigenvalues)
 
@@ -181,8 +178,20 @@ def process_sequence(folder, path, matrix_tranformation, diagonal_analysis, isom
         if compute_reeb:
             prev_verts = meshn_1.vertices if matrix_tranformation else None
             RG_out_path = compute_RG(meshn, i, reeb_scalar, bins, scalar_kwargs, target_folder, loaded_selections_rg, needs_spectral_processing, prev_verts, p2p_zo)
-            
+
+        if compute_basicGeo:
+            metrics_dict = compute_mesh_geometry(meshn, metrics=metrics)
+            computed_metrics.append(metrics_dict)
+
         meshn_1 = meshn
+
+    if computed_metrics:
+        df_results = pd.DataFrame(computed_metrics)
+        csv_path = geom_path / 'features_computed.csv'
+        df_results.to_csv( csv_path, index=False)
+        if plot_basicGeo:
+            generate_plots_from_csv(csv_path)    
+       
 
     if matrix_tranformation and heatmap_paths:
         headmap_gif(heatmap_paths, target_folder)
@@ -228,9 +237,13 @@ def run_pipeline(path_str, is_batch=False, batch_kwargs=None, **kwargs):
         is_spectral = reeb_scalar in spectral_methods or reeb_scalar.startswith("lb_eigen_")
         needs_spectral_processing = matrix_tranformation or is_spectral
 
+        compute_basicGeo = current_params.get("compute_basicGeo", True)
+        plot_basicGeo = current_params.get("plot_basicGeo", True)
+        metrics = current_params.get("metrics",'all')
+
 
         process_seq_keys = [
-            'matrix_tranformation', 'diagonal_analysis', 'isometric_analysis',
+            'plot_basicGeo','compute_basicGeo','metrics','matrix_tranformation', 'diagonal_analysis', 'isometric_analysis',
             'k_eigenfunctions', 'k_eigenvalues', 'descriptor', 'landmarks',
             'compute_reeb', 'reeb_scalar', 'bins', 'compute_physic_fields'
         ]
@@ -243,7 +256,7 @@ def run_pipeline(path_str, is_batch=False, batch_kwargs=None, **kwargs):
             k: v for k, v in current_params.items() 
             if k not in process_seq_keys and k != 'time_graph_analysis'
         }
-
+    
         FM_out_path, RG_out_path = process_sequence(
             folder=folder,
             path=path,

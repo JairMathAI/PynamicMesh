@@ -3,7 +3,43 @@ import pickle
 import ast
 import sys
 import yaml
+import h5py
 from pathlib import Path
+import numpy as np
+import pyvista as pv
+from pyFM.mesh import TriMesh
+
+def mesh_mat2object(filepath):
+
+    filepath = Path(filepath)
+
+    if '.obj' in filepath.suffix:
+        mesh = TriMesh(str(filepath))
+    if '.mat' in filepath.suffix:
+        with h5py.File(filepath, 'r') as f:
+            vertices = np.array(f['surface/vertices']).T
+            faces = np.array(f['surface/faces'], dtype=int).T
+            if np.min(faces) == 1:
+                faces -= 1   
+            mesh = TriMesh(vertices,faces)  
+           
+    return mesh
+
+def load_aligned_mesh(filepath):
+    """
+    Loads the mesh and applies the display alignment rotations natively.
+    Creates a new TriMesh instance to safely bypass read-only property constraints.
+    """
+
+    tm_raw = mesh_mat2object(filepath)
+    
+    mesh_pv = pv.PolyData(tm_raw.vertices)
+    mesh_pv.rotate_x(90, inplace=True)
+    mesh_pv.rotate_z(90, inplace=True)
+    
+    tm_aligned = TriMesh(mesh_pv.points, tm_raw.faces)
+    
+    return tm_aligned
 
 def extract_yaml(config_path):
     config_path = Path(config_path)
@@ -21,7 +57,7 @@ def extract_yaml(config_path):
     return config
 
 
-def extract_kwargs(fm_cfg, rg_cfg):
+def extract_kwargs(fm_cfg, rg_cfg, bg_cfg):
     """Helper function to extract arguments from the config dictionaries."""
     
     k_eigen = fm_cfg.get("k_eigenfunctions", (10, 10))
@@ -39,6 +75,8 @@ def extract_kwargs(fm_cfg, rg_cfg):
     elif isinstance(k_eigen, list):
         k_eigen = tuple(k_eigen)
 
+    
+
     kwargs = {
         # Functional Map Settings
         "matrix_tranformation": fm_cfg.get("matrix_tranformation", True),
@@ -55,6 +93,11 @@ def extract_kwargs(fm_cfg, rg_cfg):
         "time_graph_analysis": rg_cfg.get("time_graph_analysis", True),
         "reeb_scalar": rg_cfg.get("reeb_scalar", "geodesic"),
         "bins": rg_cfg.get("bins", 30),
+
+        # Simple Geometry Settings
+        "compute_basicGeo": bg_cfg.get("compute_basicGeo", True),
+        "plot_basicGeo": bg_cfg.get("plot_basicGeo", True),
+        "metrics": bg_cfg.get("metrics", 'all') 
     }
 
     scalar_args = rg_cfg.get("scalar_args", {})
