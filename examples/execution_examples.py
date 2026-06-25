@@ -1,7 +1,14 @@
 from PynamicMesh.core.pipelines import run_pipeline
-from PynamicMesh.core.reeb_graph import graph_time_analysis, plot_dynamic_graph_analysis, visualize_reeb_graphs, edit_graph
-from PynamicMesh.core.physic_model import  visualize_physics
-from PynamicMesh.core.custom_fm import  visual_selection_edition, precompute_landmarks
+from PynamicMesh.core.reeb_graph import graph_time_analysis, plot_dynamic_graph_analysis  
+from pathlib import Path
+from PynamicMesh.core.graph_sim import graph_similarity, plot_graph_similarity
+from PynamicMesh.utils.visualizers import (
+    visualize_reeb_graphs, 
+    edit_graph,
+    visualize_physics,
+    visual_selection_edition, 
+    precompute_landmarks
+)
 
 ####################################################################################################### Paths reference list ##########################################################################################################################################
 
