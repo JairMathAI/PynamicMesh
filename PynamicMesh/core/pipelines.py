@@ -4,7 +4,7 @@ import pyvista as pv
 from pathlib import Path
 from tqdm.auto import tqdm
 import pandas as pd
-from PynamicMesh.core.custom_fm import CustomFunctionalMapping, pick_single_mesh
+from PynamicMesh.core.custom_fm import CustomFunctionalMapping
 from pyFM.mesh import TriMesh
 from PIL import Image
 import pickle
@@ -18,6 +18,8 @@ from PynamicMesh.core.physic_model import (
     plot_similarity_metrics,
     computing_fields  
 )
+
+from PynamicMesh.utils.visualizers import  pick_single_mesh
 from PynamicMesh.core.reeb_graph import (
     get_scalar_field, 
     compute_approx_reeb_graph, 
