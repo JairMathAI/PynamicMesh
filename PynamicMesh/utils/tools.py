@@ -183,15 +183,24 @@ def landmark_parser(landmarks, loaded_landmarks, i, mood=None):
 
     return current_landmarks
 
-
 def resolve_scalar_args(reeb_scalar, scalar_kwargs, index, num_vertices, loaded_selections=None):
     kwargs_out = scalar_kwargs.copy()
     
-    if reeb_scalar == 'geodesic':
+
+    methods_to_check = [reeb_scalar]
+    if reeb_scalar == 'multi_pca':
+        methods_to_check.extend(kwargs_out.get("fields", []))
+    
+
+    if 'geodesic' in methods_to_check or 'mass_center_geodesic' in methods_to_check:
         vertex_ref_index = scalar_kwargs.get("vertex_ref_index", None)
         if vertex_ref_index == 'precomputed':
-            selection = landmark_parser(vertex_ref_index, loaded_selections, index, reeb_scalar)
+            selection = landmark_parser(vertex_ref_index, loaded_selections, index, 'geodesic')
             kwargs_out['vertex_ref_index'] = selection
+            
+        elif vertex_ref_index == 'mass_center' or (isinstance(vertex_ref_index, list) and len(vertex_ref_index) > 0 and vertex_ref_index[0] == 'mass_center'):
+            kwargs_out['vertex_ref_index'] = 'mass_center'
+            
         else:
             if vertex_ref_index is None:
                 kwargs_out['vertex_ref_index'] = [0]
@@ -208,11 +217,16 @@ def resolve_scalar_args(reeb_scalar, scalar_kwargs, index, num_vertices, loaded_
                     else:
                         kwargs_out['vertex_ref_index'] = list(vertex_ref_index)
 
-    elif reeb_scalar == 'heat_diffusion':
+
+    if 'heat_diffusion' in methods_to_check or 'matern_kernel' in methods_to_check:
         source_idx = scalar_kwargs.get("source_idx", None)
         if source_idx == 'precomputed':
-            selection = landmark_parser(source_idx, loaded_selections, index, reeb_scalar)
+            selection = landmark_parser(source_idx, loaded_selections, index, 'heat_diffusion')
             kwargs_out['source_idx'] = selection
+            
+        elif source_idx == 'mass_center' or (isinstance(source_idx, list) and len(source_idx) > 0 and source_idx[0] == 'mass_center'):
+            kwargs_out['source_idx'] = 'mass_center'
+            
         else:
             if source_idx is None:
                 kwargs_out['source_idx'] = 0
@@ -224,12 +238,12 @@ def resolve_scalar_args(reeb_scalar, scalar_kwargs, index, num_vertices, loaded_
             else:
                 kwargs_out['source_idx'] = int(source_idx)
 
-    elif reeb_scalar == 'harmonic':
+    if 'harmonic' in methods_to_check:
         source_idx = scalar_kwargs.get("source_idx", None)
         sink_idx = scalar_kwargs.get("sink_idx", None)
         
         if source_idx == 'precomputed':
-            selection = landmark_parser(source_idx, loaded_selections, index, reeb_scalar)
+            selection = landmark_parser(source_idx, loaded_selections, index, 'harmonic')
             if selection is not None and len(selection) >= 2:
                 kwargs_out['source_idx'] = selection[0]
                 kwargs_out['sink_idx'] = selection[1]

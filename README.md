@@ -182,12 +182,26 @@ We can use a scalar function defined over each mesh $\psi_{t_{i-1}}: M_{t_{i-1}}
 
 <img src="./assets/scalar_map.PNG" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
 
-In our case we are goind to use the Dirichlet energy on each point of the mesh for the wave propagation function, the heat diffusion function, or the sum of both: $\displaystyle E[\Psi]=\frac{1}{2}\int ||\Psi(x)||^2 dx$.
+In our case we are goind to use the Dirichlet energy on each point of the mesh for the wave propagation function, the heat diffusion function, Matérn Kernel, or sum of them: $\displaystyle E[\Psi]=\frac{1}{2}\int ||\Psi(x)||^2 dx$.
+
+The Matérn Kernel is defined as $\left(\frac{2\nu}{l^2} + \lambda_i\right)^{-\left(\nu + \frac{d}{2}\right)}$ 
+
+Where:
+
+$\lambda_i$ represents the eigenvalues of the mesh's Laplace-Beltrami operator.
+
+$l$ is the lengthscale.
+
+$\nu$ governs the smoothness of the resulting field.
+
+This kernel respects the surface geometry of the shape. Mathematically, it generalizes the Laplace-Beltrami operator's spectral properties via the relationship with its eigenvalues.
 
 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
   <img src="./assets/wave_eq.gif" style="max-width: 100%; height: auto;"/>
   <img src="./assets/heat_eq.gif" style="max-width: 100%; height: auto;"/>
 </div>
+
+
 
 The composition $\psi_{t_{i-1}}(\varphi_n^{-1})$ induce a linear functional, such that for every function $f:M_{t_{i-1}} \to \mathbb{R}$ we have $\mathcal{F}_{\varphi_n}(f) = f(\varphi_n^{-1})$, so we have the functional transformation $\mathcal{F}_{\varphi_n} : \mathcal{L}(M_{t_{i-1}},\mathbb{R}) \to \mathcal{L}(M_{t_{i}},\mathbb{R})$ where the task to find $\varphi_n$ now means finding a representation for the functional $\mathcal{F}_{\varphi_n}$.
 
@@ -350,11 +364,11 @@ Flag to indicate the computation and storage of the physical fields (once); if i
 compute_physic_fields (bool)
 ```
     
-Energy function used on the pipeline: WKS (wave propagation kernel), HKS (heat diffusion kernel), or WKS+HKS (both).
+Energy function used on the pipeline: WKS (wave propagation kernel), HKS (heat diffusion kernel) or MKS (Matérn Kernel) or respective sums of energies.
 ```python 
-descriptor (str): 'HKS' | 'WKS' | 'WKS+HKS'
-``` 
-    
+descriptor (str): 'HKS' | 'WKS' | 'MKS' | 'WKS+HKS' | 'WKS+MKS' | 'WKS+HKS+MKS'
+```
+
 Number of eigenfunctions used on the base matrix $k_\text{eigenfunction} \times k_\text{eigenfunction}$:
 ```python 
 k_eigenfunctions (tuple) (int,int)
@@ -369,7 +383,31 @@ k_eigenvalues (int)
 Vertex indices indicators for symmetry restriction:
 ```python 
 landmark (list|str):
-``` 
+```
+
+
+In the case of ```'MKS'``` usage for descriptors some extra related parameters are available to set:
+
+Smoothness Parameter: 
+
+Lower values (e.g., $nu = 0.5$): Corresponds to an Exponential kernel. It creates a rougher, highly localized field that responds aggressively to fine geometric fluctuations.
+Higher values (e.g., $nu = 2.5$ or higher): Smooths out noise. Use higher values if the input meshes scans have sensor noise or surface artifacts to ignore.
+
+```python 
+nu (float)
+```
+
+Spatial bounds of the geometric features you want to capture.
+
+The min should be small enough to capture fine-grained local parts.
+The max should approach or exceed the bounding box diameter of your shape to capture global posture configurations.
+
+```python 
+min_l (float)
+```  
+```python 
+max_l (float)
+```   
 
 <details>
 <summary><span style="font-size:19px;">Landmark Options</span></summary>
@@ -759,6 +797,7 @@ reeb_scalar="normal_displacement"
 ```python 
 reeb_scalar="lb_eigen_n" 
 ```
+
 <b>Geodesic path to the center of mass:</b> 
 
 ```python 
@@ -770,6 +809,64 @@ reeb_scalar="mass_center_geodesic"
 ```python  
 reeb_scalar="multi_pca", fields=["f1","f2",..,"fn"] 
 ```
+
+<b>Matérn Kernel:</b> 
+
+Apply Matérn Kernel where:
+
+Smoothness Parameter ```nu```  Controls how "differentiable" the kernel surface is.
+
+Lower values (e.g., $nu = 0.5$): Corresponds to an Exponential kernel. It creates a rougher, highly localized field that responds aggressively to fine geometric fluctuations.
+Higher values (e.g., $nu = 2.5$ or higher): Smooths out noise. Use higher values if your input 3D scans have sensor noise or surface artifacts you want to ignore.
+
+A singular landmark ```source_idx``` on the mesh is selected as the source point. The Matérn kernel measures how strongly information "diffuses" or correlates from that source point out to every other vertex.
+
+The ```lengthscale``` referst to the spatial bounds of the geometric features to capture.
+
+A small lengthscale isolates the scalar field strictly around your source vertex.
+A large lengthscale allows the correlation field to gracefully cascade over the entire body structure, giving the Reeb graph a more stable structural backbone.
+
+```python 
+reeb_scalar="matern_kernel" , nu=0.15, source_idx=i, lengthscale=1.0  
+```
+<details>
+<summary><span style="font-size:17px;"> source_idx options</span></summary>
+
+```python 
+source_idx (str|list|int)
+```
+```source_idx``` can codify different options:
+
+Apply the same source point ($v_n$) for all the meshes:
+
+```python 
+source_idx (int): n
+```
+
+Apply the mesh mass center $(x,y,z)$ for all the meshes:
+
+```python 
+source_idx (str): 'mass_center'
+```
+
+Apply the source point $v_i$ for the mesh $M_i$. If $n$ is less than the number of meshes, for the rest the default value `source_idx=0` will be applied:
+```python 
+source_idx (list): [0,1,2,3,...,n]
+```
+
+Apply the source point $v_i$ for the mesh $M_i$. For the meshes in the None position, the default value `source_idx=0` will be applied:
+
+```python 
+source_idx (list): [0,None,None,3,...,n]
+```
+
+Visual selection, in the same fashion as in the case of the functional map (see section Landmarks graphical selection for functional maps):
+
+```python 
+source_idx (str): "precomputed"
+```
+
+</details>
 
 <b>Spectral mapping based on Heat diffusion, source point (vertex index $i$) $v_i$ and time $t$:</b> 
 
@@ -790,6 +887,11 @@ Apply the same heat source ($v_n$) for all the meshes:
 
 ```python 
 source_idx (int): n
+```
+Apply the mesh mass center $(x,y,z)$ for all the meshes:
+
+```python 
+source_idx (str): 'mass_center'
 ```
 
 Apply the heat source $v_i$ for the mesh $M_i$. If $n$ is less than the number of meshes, for the rest the default value `source_idx=0` will be applied:
@@ -866,6 +968,11 @@ The parameter `vertex_ref_index` can codify different options:
 
 ```python 
 vertex_ref_index (str|list)
+```
+Apply the mesh mass center $(x,y,z)$ for all the meshes:
+
+```python 
+vertex_ref_index (str): 'mass_center'
 ```
 
 Apply the set of reference vertices $[v_0,...,v_n]$ for every mesh.

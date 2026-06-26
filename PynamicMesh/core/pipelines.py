@@ -19,7 +19,7 @@ from PynamicMesh.core.physic_model import (
     computing_fields  
 )
 
-from PynamicMesh.utils.visualizers import  pick_single_mesh
+from PynamicMesh.utils.visualizers import pick_single_mesh
 from PynamicMesh.core.reeb_graph import (
     get_scalar_field, 
     compute_approx_reeb_graph, 
@@ -64,11 +64,11 @@ def compute_FM(meshn_1, meshn, i, target_folder, descriptor, current_landmarks, 
         cdf_history.append(cdf)
         plot_diagonal(inertia_history, decay_history, cdf_history, target_folder / 'Diagonal_analysis' / 'Diagonal_metrics.png')
 
-        diag_csv_path = target_folder / 'Diagonal_analysis' / 'Diagonal_Metrics.csv'
-        with open(diag_csv_path, mode='w', encoding='utf-8') as diag_csv:
-            diag_csv.write("Timestep,Map,Inertia_Metric,Decay_Metric\n")
-            for idx_d, (inr_val, dec_val) in enumerate(zip(inertia_history, decay_history)):
-                diag_csv.write(f"{idx_d+1},FM_{idx_d}{idx_d+1},{inr_val:.6f},{dec_val:.6f}\n")
+        make_csv = target_folder / 'Diagonal_analysis' / 'Diagonal_Metrics.csv'
+        with open(make_csv, mode='w', encoding='utf-8') as csv_file:
+            csv_file.write("Timestep,Map,Inertia_Metric,Decay_Metric\n")
+            for idx, (inrt_v, decy_v) in enumerate(zip(inertia_history, decay_history)):
+                csv_file.write(f"{idx+1},FM_{idx}{idx+1},{inrt_v:.6f},{decy_v:.6f}\n")
     
     if prev_FM_zo is not None and isometric_analysis:
         jsd, pearson, spearman, manhattan, euclidean = compute_heatmap_similarity(prev_FM_zo, FM_zo)
@@ -132,12 +132,12 @@ def process_sequence(folder, path,compute_basicGeo ,plot_basicGeo, metrics, matr
         source_idx = scalar_kwargs.get("source_idx", None)
         if reeb_scalar == 'geodesic' and vertex_ref_index == 'precomputed':
             loaded_selections_rg = landmark_load(vertex_ref_index, target_folder, reeb_scalar)
-        elif reeb_scalar == 'heat_diffusion' and source_idx == 'precomputed':
+        elif reeb_scalar in ['heat_diffusion', 'matern_kernel'] and source_idx == 'precomputed':
             loaded_selections_rg = landmark_load(source_idx, target_folder, reeb_scalar)
         elif reeb_scalar == 'harmonic' and source_idx == 'precomputed':
             loaded_selections_rg = landmark_load(source_idx, target_folder, reeb_scalar)
 
-    # Use the aligned mesh loader
+
     meshn_1 = load_aligned_mesh(obj_files[0])
 
     if needs_spectral_processing:
@@ -162,7 +162,6 @@ def process_sequence(folder, path,compute_basicGeo ,plot_basicGeo, metrics, matr
     
     for i in tqdm(range(1, len(obj_files)), desc=f'processing {scene_name}', leave=False):
 
-        # Use the aligned mesh loader
         meshn = load_aligned_mesh(obj_files[i])
         p2p_zo = None
 
@@ -236,7 +235,7 @@ def run_pipeline(path_str, is_batch=False, batch_kwargs=None, **kwargs):
         reeb_scalar = current_params.get("reeb_scalar", "geodesic")
         time_graph_analysis = current_params.get("time_graph_analysis", True)
 
-        spectral_methods = ["heat_diffusion", "harmonic", "multi_pca"]
+        spectral_methods = ["heat_diffusion", "harmonic", "multi_pca", "matern_kernel"]
         is_spectral = reeb_scalar in spectral_methods or reeb_scalar.startswith("lb_eigen_")
         needs_spectral_processing = matrix_tranformation or is_spectral
 

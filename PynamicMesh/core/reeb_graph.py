@@ -17,7 +17,7 @@ from scipy.stats import wasserstein_distance
 from scipy.linalg import eigvalsh
 import warnings
 import copy
-from PynamicMesh.utils.tools import  mesh_mat2object
+from PynamicMesh.utils.tools import mesh_mat2object
 
 try:
     import cupy as xp
@@ -27,6 +27,15 @@ except ImportError:
     xp = np
     GPU_AVAILABLE = False
     print("[INFO] CuPy not found. Defaulting to CPU (NumPy).")
+
+
+try:
+    from geometrickernels.spaces import Mesh as GKMesh
+    from geometrickernels.kernels import MaternKarhunenLoeveKernel
+    import lab as B
+    GK_AVAILABLE = True
+except ImportError:
+    GK_AVAILABLE = False
 
 def to_gpu(arr):
     """Moves a numpy array to the GPU if available."""
@@ -83,8 +92,7 @@ def graph_time_analysis(reeb_folder_path, single_file=True):
         degrees_curr = [d for n, d in G_curr.degree()] if v_curr > 0 else [0]
         
         deg_wasserstein = wasserstein_distance(degrees_prev, degrees_curr)
-        
-        # --- GPU-Accelerated Dense Spectral Laplacian distance ---
+
         if v_prev > 0 and v_curr > 0:
             lap_prev_np = np.asarray(nx.normalized_laplacian_matrix(G_prev).todense())
             lap_curr_np = np.asarray(nx.normalized_laplacian_matrix(G_curr).todense())
@@ -230,7 +238,7 @@ def _get_mesh_adjacency(vertices, faces):
 def compute_geodesic_distance(vertices, faces, vertex_ref_index):
     # TriMesh requires standard numpy arrays on CPU host memory
     dist_matrix = TriMesh(to_cpu(vertices), to_cpu(faces)).geod_from(vertex_ref_index)
-    return dist_matrix
+    return np.asarray(dist_matrix).flatten()
 
 def compute_harmonic_field(trimesh_obj, source_idx, sink_idx):
     """Solves the Laplace equation Δf = 0 with Dirichlet boundary conditions."""
@@ -247,7 +255,6 @@ def compute_harmonic_field(trimesh_obj, source_idx, sink_idx):
     W_mod[sink_idx, sink_idx] += penalty
     b[source_idx] *= penalty
     
-    # Suppress sparse efficiency warnings for direct modification
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         f = splinalg.spsolve(W_mod, b)
@@ -258,7 +265,6 @@ def compute_heat_diffusion(trimesh_obj, source_idx, t=10.0):
     evals_gpu = to_gpu(trimesh_obj.eigenvalues)
     evecs_gpu = to_gpu(trimesh_obj.eigenvectors)
     
-    # Computes weights for all eigenfunctions inside a single unified matrix-vector product
     weights = xp.exp(-t * evals_gpu) * evecs_gpu[source_idx, :]
     heat_gpu = evecs_gpu @ weights
     
@@ -268,10 +274,10 @@ def get_scalar_field(vertices, faces, method="z", prev_vertices=None, p2p=None, 
     method = method.lower()
     num_vertices = vertices.shape[0]
     
-    # Move coordinate arrays to GPU for unified operations
+
     v_gpu = to_gpu(vertices)
     
-    # --- Standard Geometric & Coordinate Fields ---
+
     if method == "x": return to_cpu(v_gpu[:, 0])
     elif method == "y": return to_cpu(v_gpu[:, 1])
     elif method == "z": return to_cpu(v_gpu[:, 2])
@@ -290,7 +296,7 @@ def get_scalar_field(vertices, faces, method="z", prev_vertices=None, p2p=None, 
         central_vertex_idx = np.argmin(dist_to_center)
         return compute_geodesic_distance(vertices_cpu, faces_cpu, [central_vertex_idx])
     
-    # --- Local Surface Metrics (Curvatures using CPU-bound PyVista) ---
+
     elif method in ["mean_curvature", "gaussian_curvature", "shape_index", "curvedness"]:
         vertices_cpu = to_cpu(vertices)
         faces_cpu = to_cpu(faces)
@@ -315,7 +321,7 @@ def get_scalar_field(vertices, faces, method="z", prev_vertices=None, p2p=None, 
                 C = np.sqrt(np.maximum(2 * H**2 - K, 0))
                 return np.nan_to_num(C)
 
-    # --- Displacement Flow ---
+
     elif method == "normal_displacement":
         if prev_vertices is None or p2p is None: return np.zeros(num_vertices)
         matched_prev = to_cpu(prev_vertices)[to_cpu(p2p)]
@@ -324,12 +330,23 @@ def get_scalar_field(vertices, faces, method="z", prev_vertices=None, p2p=None, 
         norm_mag, _ = compute_flow_decomposition(to_cpu(vertices), to_cpu(faces), displacements)
         return norm_mag
 
-    # --- Geodesic Distance ---
     elif method == "geodesic":
         vertex_ref_index = kwargs.get("vertex_ref_index", [0])
-        return compute_geodesic_distance(to_cpu(vertices), to_cpu(faces), vertex_ref_index)
 
-    # --- Spectral Methods ---
+        if vertex_ref_index == 'mass_center' or (isinstance(vertex_ref_index, list) and len(vertex_ref_index) > 0 and vertex_ref_index[0] == 'mass_center'):
+            vertices_cpu = to_cpu(vertices)
+            faces_cpu = to_cpu(faces)
+        
+            center = TriMesh(vertices_cpu, faces_cpu).center_mass
+            
+            dist_to_center = np.linalg.norm(vertices_cpu - center, axis=1)
+            central_vertex_idx = np.argmin(dist_to_center)
+            
+            vertex_ref_index = [central_vertex_idx]
+
+        return compute_ge
+
+
     elif method.startswith("lb_eigen_"):
         if trimesh_obj is None: raise ValueError("trimesh_obj is required for LB eigenfunctions.")
         idx = int(method.split("_")[-1])
@@ -338,6 +355,14 @@ def get_scalar_field(vertices, faces, method="z", prev_vertices=None, p2p=None, 
     elif method == "heat_diffusion":
         if trimesh_obj is None: raise ValueError("trimesh_obj is required for heat diffusion.")
         source_idx = kwargs.get("source_idx", 0)
+        
+        if source_idx == 'mass_center' or (isinstance(source_idx, list) and len(source_idx) > 0 and source_idx[0] == 'mass_center'):
+            vertices_cpu = to_cpu(vertices)
+            faces_cpu = to_cpu(faces)
+            center = TriMesh(vertices_cpu, faces_cpu).center_mass
+            dist_to_center = np.linalg.norm(vertices_cpu - center, axis=1)
+            source_idx = int(np.argmin(dist_to_center))
+
         t = kwargs.get("t", 10.0)
         
         heat_raw = compute_heat_diffusion(trimesh_obj, source_idx, t)
@@ -351,6 +376,63 @@ def get_scalar_field(vertices, faces, method="z", prev_vertices=None, p2p=None, 
             return to_cpu(heat_normalized)
             
         return heat_raw
+        
+    elif method == "matern_kernel":
+        if trimesh_obj is None: raise ValueError("trimesh_obj is required for matern_kernel.")
+        source_idx = kwargs.get("source_idx", 0)
+        
+        if source_idx == 'mass_center' or (isinstance(source_idx, list) and len(source_idx) > 0 and source_idx[0] == 'mass_center'):
+            vertices_cpu = to_cpu(vertices)
+            faces_cpu = to_cpu(faces)
+            center = TriMesh(vertices_cpu, faces_cpu).center_mass
+            dist_to_center = np.linalg.norm(vertices_cpu - center, axis=1)
+            source_idx = int(np.argmin(dist_to_center))
+
+        nu = kwargs.get("nu", 1.5)
+        lengthscale = kwargs.get("lengthscale", 1.0)
+
+        global GK_AVAILABLE
+        if GK_AVAILABLE:
+            try:
+                gk_mesh = GKMesh(to_cpu(vertices), to_cpu(faces))
+                kernel = MaternKarhunenLoeveKernel(gk_mesh, num_eigenfunctions=len(trimesh_obj.eigenvalues))
+                
+                if hasattr(gk_mesh, '_eigenvalues'):
+                    gk_mesh._eigenvalues = trimesh_obj.eigenvalues
+                    gk_mesh._eigenfunctions = trimesh_obj.eigenvectors
+
+                X_source = np.array([[source_idx]])
+                X_all = np.arange(len(vertices)).reshape(-1, 1)
+
+                if hasattr(kernel, "init_params_and_state"):
+                    params, state = kernel.init_params_and_state()
+                    params["nu"] = np.array([nu])
+                    params["lengthscale"] = np.array([lengthscale])
+                    K_vals = kernel.K(params, state, X_all, X_source)
+                else:
+                    params = {"nu": np.array([nu]), "lengthscale": np.array([lengthscale])}
+                    K_vals = kernel.K(params, X_all, X_source)
+                matern_raw = B.to_numpy(K_vals).flatten()
+            except Exception:
+                GK_AVAILABLE = False  
+
+        if not GK_AVAILABLE:
+            evals = trimesh_obj.eigenvalues
+            evecs = trimesh_obj.eigenvectors
+            power = -(nu + 1.0)
+            weights = ((2 * nu) / (lengthscale**2) + evals) ** power
+            phi_source = evecs[source_idx, :]
+            matern_raw = (evecs * weights) @ phi_source
+
+        if kwargs.get("equalize_histogram", True):
+            matern_gpu = to_gpu(matern_raw)
+            temp = matern_gpu.argsort()
+            ranks = xp.empty_like(temp)
+            ranks[temp] = xp.arange(len(matern_gpu))
+            matern_normalized = ranks / (len(matern_gpu) - 1.0)
+            return to_cpu(matern_normalized)
+            
+        return to_cpu(matern_raw)
 
     elif method == "harmonic":
         if trimesh_obj is None: raise ValueError("trimesh_obj is required for harmonic fields.")
@@ -375,7 +457,7 @@ def get_scalar_field(vertices, faces, method="z", prev_vertices=None, p2p=None, 
         raise ValueError(f"Unknown scalar field method: {method}")
 
 def compute_approx_reeb_graph(vertices, faces, scalar_field, num_bins=20):
-    # Ensure inputs are safely mapped to CPU NumPy space for standard NetworkX graph construction
+    
     v_cpu = to_cpu(vertices)
     f_cpu = to_cpu(faces)
     sf_cpu = to_cpu(scalar_field)
@@ -445,4 +527,3 @@ def create_reeb_polydata(graph):
     if lines:
         mesh.lines = np.array(lines)
     return mesh
-

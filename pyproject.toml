@@ -26,6 +26,9 @@ dependencies = [
     "pyyaml",
     "trimesh",
     "rtree",
+    "geometric_kernels",
+    "torch",
+    "gpytorch"
 ]
 
 
