@@ -27,6 +27,13 @@ from PynamicMesh.core.reeb_graph import (
     graph_time_analysis,
     plot_dynamic_graph_analysis
 )
+from PynamicMesh.core.SMComplex import (
+    compute_MS,
+    RegionTracker,
+    critical_points_report,
+    tracking_report,
+    ms_graph_analysis
+)
 from PynamicMesh.utils.tools import (
     landmark_load,
     landmark_parser,
@@ -233,6 +240,27 @@ def compute_RG(meshn, i, reeb_scalar, bins, scalar_kwargs, target_folder, loaded
     return str(reeb_folder)
 
 
+def compute_MS_frame(meshn, i, ms_scalar, reeb_scalar, compute_reeb, scalar_kwargs, target_folder, loaded_selections_rg,
+                     needs_spectral_processing, ms_persistence, ms_min_region_area, mscomplex_graph, ms_graph_type,
+                     prev_vertices=None, p2p_zo=None):
+    """
+    Morse–Smale complex of frame i (SMComplex.compute_MS). When the requested field is the Reeb field of
+    the same frame and it has just been saved, it is reused instead of recomputed.
+    """
+    scalar_field = None
+    reeb_scalar_file = target_folder / 'Reeb_Graphs' / f'Scalar_T{i:04d}.npy'
+    if compute_reeb and ms_scalar == reeb_scalar and reeb_scalar_file.exists():
+        cached = np.load(reeb_scalar_file)
+        if cached.shape[0] == meshn.vertices.shape[0]:
+            scalar_field = cached
+    selections = loaded_selections_rg if ms_scalar == reeb_scalar else None
+    tn_kwargs = resolve_scalar_args(ms_scalar, scalar_kwargs, i, meshn.vertices.shape[0], selections)
+    return compute_MS(meshn.vertices, meshn.faces, i, target_folder, scalar_field=scalar_field,
+                      scalar_method=ms_scalar, scalar_kwargs=tn_kwargs, persistence=ms_persistence,
+                      min_region_area=ms_min_region_area, build_graph=mscomplex_graph, graph_type=ms_graph_type,
+                      trimesh_obj=meshn if needs_spectral_processing else None, prev_vertices=prev_vertices, p2p=p2p_zo)
+
+
 def headmap_gif(heatmap_paths, target_folder):
     frames = [Image.open(img_path) for img_path in heatmap_paths]
     gif_path = target_folder / 'Diagonal_analysis' / 'FM_Heatmap_Animation.gif'
@@ -243,9 +271,28 @@ def process_sequence(folder, path, compute_basicGeo=True, plot_basicGeo=True, me
                      matrix_tranformation=True, diagonal_analysis=True, isometric_analysis=True,
                      k_eigenvalues=100, k_eigenfunctions=30, descriptor='WKS', landmarks=None,
                      compute_reeb=True, reeb_scalar='geodesic', bins=20, needs_spectral_processing=True,
-                     compute_physic_fields=False, scalar_kwargs=None, fm_params=None):
+                     compute_physic_fields=False, scalar_kwargs=None, fm_params=None,
+                     compute_mscomplex=False, ms_scalar=None, ms_persistence=0.05, ms_min_region_area=0.0,
+                     mscomplex_graph=False, ms_graph_type='star', ms_track_regions=True, ms_graph_metrics='all',
+                     ms_tracker_params=None):
+    """
+    Morse–Smale options (results under Results/<scene>/MSComplexAnalysis):
+        compute_mscomplex  : Morse–Smale complex + protrusion segmentation of every frame, critical point csv/plots
+        ms_scalar          : scalar field of the complex (any get_scalar_field method); None = reeb_scalar
+        ms_persistence     : persistence simplification threshold (fraction of the field range)
+        ms_min_region_area : merge regions smaller than this fraction of the surface into their neighbour
+        mscomplex_graph    : build the critical-point graph (star to the centre of mass) and run the
+                             Reeb-graph analyses (graph_time_analysis, graph_similarity) on it
+        ms_graph_type      : 'star' | 'star+adjacency' (adds edges between adjacent protrusion regions)
+        ms_track_regions   : region correspondence / critical point fates through the functional maps
+                             (needs matrix_tranformation=True)
+        ms_graph_metrics   : metrics for graph_similarity on the critical-point graphs
+        ms_tracker_params  : dict for RegionTracker (iou_threshold, dominance, fate_radius, growth_tolerance, ghost_horizon)
+    """
     scalar_kwargs = scalar_kwargs or {}
     fm_params = fm_params or {}
+    ms_scalar = (ms_scalar or reeb_scalar).lower()
+    ms_tracker_params = ms_tracker_params or {}
     itemsfiles = list(folder.iterdir())
     obj_files = sorted([f for f in itemsfiles if f.is_file() and f.suffix in ('.obj', '.mat')], key=natural_sort_key)
 
@@ -261,6 +308,12 @@ def process_sequence(folder, path, compute_basicGeo=True, plot_basicGeo=True, me
     if compute_reeb and reeb_scalar in MAP_DEPENDENT_METHODS and not matrix_tranformation:
         print(f"\n[Warning] '{reeb_scalar}' requires matrix_tranformation=True; skipping Reeb graphs for {scene_name}.")
         compute_reeb = False
+    if compute_mscomplex and ms_scalar in MAP_DEPENDENT_METHODS and not matrix_tranformation:
+        print(f"\n[Warning] '{ms_scalar}' requires matrix_tranformation=True; skipping Morse–Smale complexes for {scene_name}.")
+        compute_mscomplex = False
+    if compute_mscomplex and ms_track_regions and not matrix_tranformation:
+        print(f"\n[Warning] Region tracking needs the functional maps (matrix_tranformation=True); only the segmentation will be computed for {scene_name}.")
+        ms_track_regions = False
 
     # 'auto' landmarks are selected per pair inside CustomFunctionalMapping; the file-based
     # landmark_load/landmark_parser path is only used for precomputed selections.
@@ -287,6 +340,13 @@ def process_sequence(folder, path, compute_basicGeo=True, plot_basicGeo=True, me
     # graph that only pollutes the time series). Start those at frame 1 instead.
     if compute_reeb and reeb_scalar not in MAP_DEPENDENT_METHODS:
         compute_RG(meshn_1, 0, reeb_scalar, bins, scalar_kwargs, target_folder, loaded_selections_rg, needs_spectral_processing)
+
+    ms_prev = None
+    ms_tracker = RegionTracker(target_folder, **ms_tracker_params) if (compute_mscomplex and ms_track_regions) else None
+    if compute_mscomplex and ms_scalar not in MAP_DEPENDENT_METHODS:
+        ms_prev = compute_MS_frame(meshn_1, 0, ms_scalar, reeb_scalar, compute_reeb, scalar_kwargs, target_folder,
+                                   loaded_selections_rg, needs_spectral_processing, ms_persistence, ms_min_region_area,
+                                   mscomplex_graph, ms_graph_type)
 
     computed_metrics = []            # always defined: avoids NameError when compute_basicGeo=False
     geom_path = None
@@ -329,6 +389,16 @@ def process_sequence(folder, path, compute_basicGeo=True, plot_basicGeo=True, me
             prev_verts = meshn_1.vertices if matrix_tranformation else None
             RG_out_path = compute_RG(meshn, i, reeb_scalar, bins, scalar_kwargs, target_folder, loaded_selections_rg, needs_spectral_processing, prev_verts, p2p_zo)
 
+        if compute_mscomplex:
+            prev_verts = meshn_1.vertices if matrix_tranformation else None
+            ms_curr = compute_MS_frame(meshn, i, ms_scalar, reeb_scalar, compute_reeb, scalar_kwargs, target_folder,
+                                       loaded_selections_rg, needs_spectral_processing, ms_persistence, ms_min_region_area,
+                                       mscomplex_graph, ms_graph_type, prev_verts, p2p_zo)
+            if ms_tracker is not None and ms_prev is not None and p2p_zo is not None:
+                ms_tracker.track_pair(ms_prev, ms_curr, meshn_1.vertices, meshn_1.faces, meshn.vertices, meshn.faces,
+                                      p2p_zo, FM_12=FM_zo, mesh_prev=meshn_1, mesh_curr=meshn)
+            ms_prev = ms_curr
+
         if compute_basicGeo:
             computed_metrics.append(compute_mesh_geometry(meshn, metrics=metrics))
 
@@ -343,6 +413,14 @@ def process_sequence(folder, path, compute_basicGeo=True, plot_basicGeo=True, me
 
     if matrix_tranformation and heatmap_paths:
         headmap_gif(heatmap_paths, target_folder)
+
+    if compute_mscomplex:
+        critical_points_report(target_folder, single_file=False)
+        if ms_tracker is not None and ms_tracker.summary:
+            ms_tracker.save()
+            tracking_report(target_folder, single_file=False)
+        if mscomplex_graph:
+            ms_graph_analysis(target_folder, graph_metrics=ms_graph_metrics, single_file=False)
 
     if compute_physic_fields:
         if not matrix_tranformation:
@@ -370,7 +448,9 @@ def run_pipeline(path_str, is_batch=False, batch_kwargs=None, **kwargs):
     process_seq_keys = [
         'plot_basicGeo', 'compute_basicGeo', 'metrics', 'matrix_tranformation', 'diagonal_analysis', 'isometric_analysis',
         'k_eigenfunctions', 'k_eigenvalues', 'descriptor', 'landmarks',
-        'compute_reeb', 'reeb_scalar', 'bins', 'compute_physic_fields', 'fm_params'
+        'compute_reeb', 'reeb_scalar', 'bins', 'compute_physic_fields', 'fm_params',
+        'compute_mscomplex', 'ms_scalar', 'ms_persistence', 'ms_min_region_area', 'mscomplex_graph',
+        'ms_graph_type', 'ms_track_regions', 'ms_graph_metrics', 'ms_tracker_params'
     ]
     pipeline_only_keys = {'time_graph_analysis', 'graph_sim', 'graph_metrics'}
 
@@ -404,7 +484,10 @@ def run_pipeline(path_str, is_batch=False, batch_kwargs=None, **kwargs):
             if k not in process_seq_keys and k not in pipeline_only_keys
         }
 
-        needs_spectral_processing = matrix_tranformation or (compute_reeb and needs_spectral(reeb_scalar, scalar_kwargs))
+        compute_mscomplex = current_params.get("compute_mscomplex", False)
+        ms_scalar = (current_params.get("ms_scalar") or reeb_scalar).lower()
+        needs_spectral_processing = (matrix_tranformation or (compute_reeb and needs_spectral(reeb_scalar, scalar_kwargs))
+                                     or (compute_mscomplex and needs_spectral(ms_scalar, scalar_kwargs)))
 
         FM_out_path, RG_out_path = process_sequence(
             folder=folder,

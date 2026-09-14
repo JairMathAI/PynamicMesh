@@ -3,12 +3,14 @@ from PynamicMesh.core.reeb_graph import graph_time_analysis, plot_dynamic_graph_
 from pathlib import Path
 from PynamicMesh.core.graph_sim import graph_similarity, plot_graph_similarity
 from PynamicMesh.utils.visualizers import (
-    visualize_reeb_graphs, 
+    visualize_reeb_graphs,
     edit_graph,
     visualize_physics,
     visual_selection_edition, 
     precompute_landmarks,
-    visualize_obj_sequence
+    visualize_obj_sequence,
+    visualize_ms_complex,
+    visualize_graphs
 )
 
 ####################################################################################################### Paths reference list ##########################################################################################################################################
@@ -93,6 +95,30 @@ metrics = 'all' # ['n_vertices', 'n_faces', 'area', 'volume', 'sphericity', 'gau
 compute_Graphsimilarity = True
 graph_metrics = 'all' # ['degree_wasserstein','spectral_laplacian','interleaving_distance','labeled_interleaving_distance','function_distortion_distance','branch_decomposition_distance']
 
+####################################################################################################### Morse-Smale Complex Settings ###################################################################################################################################
+# Morse-Smale complex of a scalar field on every mesh: regions of the maxima = protrusion segmentation,
+# critical points (max / min / saddle) after persistence simplification, csv + plots under
+# Results/<scene>/MSComplexAnalysis. Any Reeb scalar field can be used; for protrusions the distance to the
+# centre of mass ('dist_centroid' / 'mass_center_geodesic') is the natural choice.
+compute_MSComplex = True
+ms_scalar_field = 'dist_centroid'   # None -> same field as the Reeb graph (reused, not recomputed)
+ms_persistence = 0.08               # extrema with persistence < 8% of the field range are merged (noise)
+ms_min_region_area = 0.0            # optionally merge regions smaller than this fraction of the surface
+mscomplex_graph = True              # star graph: critical points connected to the centre of mass ...
+ms_graph_type = 'star+adjacency'    # 'star' | 'star+adjacency' (... plus edges between adjacent protrusion regions);
+                                    # the Reeb-graph analyses (graph_time_analysis, graph_similarity) run on these graphs
+ms_track_regions = True             # regions / critical points followed through the functional maps (needs compute_FM):
+                                    # region lineage (continue / split / merge / birth / death), fate of every critical
+                                    # point (max -> max / saddle / min / regular), inversions over several frames, growth
+ms_tracker_params = {
+    'iou_threshold': 0.25,          # minimum IoU (area weighted) for a matched region pair
+    'dominance': 0.5,               # dominant-overlap fraction used for split / merge relations
+    'fate_radius': 0.04,            # search radius of the nearest critical point (fraction of sqrt(area))
+    'growth_tolerance': 0.002,      # |normal displacement| below this (fraction of sqrt(area)) is 'stable'
+    'ghost_horizon': 6,             # frames a vanished critical point keeps being followed (to catch inversions)
+}
+
+
 
 ####################################################################################################### Pipeline Runing ###################################################################################################################################################
 print('Executing pipeline ...')
@@ -116,7 +142,16 @@ run_pipeline(
     bins=bins,
     vertex_ref_index=vertex_ref_index,
     graph_sim = compute_Graphsimilarity,
-    graph_metrics = graph_metrics
+    graph_metrics = graph_metrics,
+    compute_mscomplex=compute_MSComplex,
+    ms_scalar=ms_scalar_field,
+    ms_persistence=ms_persistence,
+    ms_min_region_area=ms_min_region_area,
+    mscomplex_graph=mscomplex_graph,
+    ms_graph_type=ms_graph_type,
+    ms_track_regions=ms_track_regions,
+    ms_graph_metrics=graph_metrics,
+    ms_tracker_params=ms_tracker_params
     )
 
 ###########################################################################################################################################################################################################################################################################
@@ -139,7 +174,7 @@ plot_dynamic_graph_analysis(csv_file_path)
 
 ####################################################################################################### Reeb Graph Visualizer Launcher  #####################################################################################################################################
 print('Reeb visualizations...') 
-visualize_reeb_graphs(mesh_path, reeb_path)
+visualize_graphs(mesh_path, reeb_path, graph='reeb')
 
 ####################################################################################################### Functional Map Visualizer Launcher  #################################################################################################################################
 print('Multi-Physics Mapping visualizations...') 
@@ -149,6 +184,14 @@ visualize_physics(mesh_path, matrix_path, on_time=False)
 ####################################################################################################### Mesh sequence Visualizer Launcher  #################################################################################################################################
 print('Mesh sequence Visualization...') 
 visualize_obj_sequence(mesh_objs_folder)
+
+####################################################################################################### Morse-Smale Visualizer Launcher  ####################################################################################################################################
+print('Morse-Smale segmentation visualizations...')
+visualize_ms_complex(mesh_path, ms_path)
+
+####################################################################################################### Morse-Smale Graph Visualizer Launcher  ####################################################################################################################################
+print('Morse-Smale graph visualizations...')
+visualize_graphs(mesh_path, ms_graph_path, graph='mscomplex')
 
 ###################################################################################################### Similarity Metrics Among Graphs and ploting  ##########################################################################################################################
 csv_sim_path = graph_similarity(reeb_folder_path=reeb_path,metrics_list=graph_metrics)
@@ -161,7 +204,7 @@ plot_graph_similarity(csv_sim_path)
 from PynamicMesh.utils.mat_files import MatViewer 
 from pathlib import Path
 
-folder_path = Path(r'C:\Users\jair.sanchez\Downloads\Projects\PynamicMesh\Real_cell\Dendetric\Dendetric1\Img')
+folder_path = Path('path/to/.mat/folder')
 viewer = MatViewer(folder_path)
 viewer.show()
 
@@ -169,108 +212,8 @@ viewer.show()
 from PynamicMesh.utils.mat_files import mat_file_converter 
 from pathlib import Path
 
-folder_path = Path(r'C:\Users\jair.sanchez\Downloads\Projects\PynamicMesh\Real_cell\Dendetric\Dendetric1\Img')
+folder_path = Path('path/to/.mat/folder')
 mat_file_converter(folder_path)
 
 #################################################################################################################################################################################################################################################################################
 
-####################################################################################################### Paths reference list ####################################################################################################################################################
-
-from PynamicMesh.utils.batch import run_batch
-from PynamicMesh.utils.tools import extract_yaml
-
-config_path = '/PynamicMesh/examples/config_batch.yaml' # vlinux
-config_path = r'\PynamicMesh\examples\config_batch.yaml' # windows
-
-config = extract_yaml(config_path)
-data_cfg = config.get("Data", {})
-path_str = data_cfg.get("path_str")
-run_batch(config,path_str)
-
-##################################################################################################################################################################################################################################################################################
-####################################################################################################### FM use of cases example ###################################################################################################################################################
-
-#   'a' : FM without landmarks, plain intrinsic descriptors            (baseline; symmetric flips possible)
-#   'b' : FM with precomputed (manually selected) landmarks only
-#   'c' : FM with automatic landmarks only
-#   'd' : FM with symmetry-aware descriptors only, no landmarks at all  (orientation term + extrinsic XYZ block)
-EXAMPLE = 'd'
-
-compute_FM = True
-compute_FMdiagonal_analysis = True
-compute_isometric_analysis = True
-FM_k_eigenfunctions = (10, 10)
-FM_k_eigenvalues = 100
-compute_physic_fields = True
-
-common_fm_params = {
-    'n_descr': 100,
-    'subsample_step': 4,
-    'descr_params': {'nu': 1.5, 'k_smooth': 30, 'xyz_weight': 0.25},
-    'fit_params': {'w_descr': 1e-1, 'w_lap': 1e-3, 'w_dcomm': 1.0},
-    'refine': 'auto',
-    'dt': 1.0,
-    'verbose': False,        # prints the descriptor plan and the landmarks kept for each pair
-}
-
-FM_EXAMPLES = {
-    # ---------------------------------------------------------------------------------------------------------------
-    # a) No landmarks. Only intrinsic point signatures: the map is determined up to the intrinsic symmetries
-    #    of the shape (left/right legs can be swapped between frames).
-    'a': dict(
-        descriptor='WKS+HKS+MKS',           # equal energy shares; or e.g. '0.5*WKS + 0.3*HKS + 0.2*MKS'
-        landmarks=None,
-        fm_params={**common_fm_params, 'symmetry_mode': 'none'},
-    ),
-    # ---------------------------------------------------------------------------------------------------------------
-    # b) Precomputed landmarks only. Uses the selections stored by precompute_landmarks() /
-    #    visual_selection_edition() (mood='FM'); landmark-localized WKS descriptors break the symmetry.
-    'b': dict(
-        descriptor='WKS+HKS+MKS',
-        landmarks='precomputed',
-        fm_params={**common_fm_params, 'symmetry_mode': 'landmarks',
-                   'landmark_params': {'weight': 1.0, 'descriptor': 'WKS'}},
-    ),
-    # ---------------------------------------------------------------------------------------------------------------
-    # c) Automatic landmarks only. Farthest-point samples on frame t (extremities first), matched on frame t+1
-    #    (descriptor match within a spatial radius), outliers rejected by displacement / duplicates / geodesic
-    #    consistency. Landmarks used are saved in Results\<scene>\Landmarks\.
-    'c': dict(
-        descriptor='WKS+HKS+MKS',
-        landmarks='auto',
-        fm_params={**common_fm_params, 'symmetry_mode': 'landmarks',
-                   'landmark_params': {'n_landmarks': 12, 'match': 'hybrid', 'max_rel_dist': 0.15,
-                                       'max_distortion': 0.25, 'min_landmarks': 4, 'search_rel_radius': 0.10,
-                                       'weight': 1.0}},
-    ),
-    # ---------------------------------------------------------------------------------------------------------------
-    # d) Symmetry-aware descriptors only, no landmarks. 'extrinsic' adds an aligned-coordinates (XYZ) descriptor
-    #    block (valid between aligned consecutive frames), 'orientation' adds the orientation-preserving operator
-    #    term (w_orient) that penalizes the mirrored map. The XYZ block can also be requested explicitly in the
-    #    descriptor string, e.g. '0.5*WKS + 0.3*MKS + 0.2*XYZ' (then 'extrinsic' is redundant).
-    'd': dict(
-        descriptor='WKS+HKS+MKS',
-        landmarks=None,
-        fm_params={**common_fm_params, 'symmetry_mode': 'orientation+extrinsic',
-                   'fit_params': {**common_fm_params['fit_params'], 'w_orient': 1.0}},
-    ),
-}
-fm_settings = FM_EXAMPLES[EXAMPLE]
-
-run_pipeline(
-    path_str=base_mesh_path,
-    compute_basicGeo=compute_BasicGeo,
-    metrics=metrics,
-    plot_basicGeo=plot_basicGeo,
-    matrix_tranformation=compute_FM,
-    diagonal_analysis=compute_FMdiagonal_analysis,
-    isometric_analysis=compute_isometric_analysis,
-    k_eigenfunctions=FM_k_eigenfunctions,
-    k_eigenvalues=FM_k_eigenvalues,
-    descriptor=fm_settings['descriptor'],
-    landmarks=fm_settings['landmarks'],
-    fm_params=fm_settings['fm_params'],
-    compute_physic_fields=compute_physic_fields
-)
-
-##################################################################################################################################################################################################################################################################################

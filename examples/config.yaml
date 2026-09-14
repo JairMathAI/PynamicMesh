@@ -60,3 +60,22 @@ Reeb_Graph:
 Graph_similarity:
     graph_sim: True
     graph_metrics: all
+MS_Complex:
+  # Morse–Smale complex of a scalar field on every mesh: regions of the maxima = protrusion segmentation,
+  # critical points after persistence simplification (csv + plots under Results/<scene>/MSComplexAnalysis).
+  compute_mscomplex: True
+  ms_scalar: 'dist_centroid'          # any Reeb scalar method; null -> the Reeb field above (reused, not recomputed)
+  ms_persistence: 0.08                # extrema lower than 8% of the field range are merged (noise); 0 keeps all
+  ms_min_region_area: 0.0             # optionally merge regions smaller than this fraction of the surface
+  mscomplex_graph: True               # critical-point graph (star to the centre of mass) + Reeb-graph analyses on it
+  ms_graph_type: 'star+adjacency'     # 'star' | 'star+adjacency' (edges between adjacent protrusion regions)
+  ms_graph_metrics: all               # graph_similarity metrics on the critical-point graphs
+  ms_track_regions: True              # regions / critical points followed through the functional maps (needs FM)
+  ms_tracker_params:                  # advanced tracker options (may also be written flat in this section)
+    iou_threshold: 0.25               # minimum area-weighted IoU for a matched region pair
+    dominance: 0.5                    # dominant-overlap fraction for split / merge relations
+    fate_radius: 0.04                 # nearest critical point search radius (fraction of sqrt(area))
+    growth_tolerance: 0.002           # |normal displacement| below this is 'stable'
+    ghost_horizon: 6                  # frames a vanished critical point keeps being followed (inversions)
+  # scalar_args:                      # extra options of ms_scalar when it differs from the Reeb field
+  #   vertex_ref_index: 'mass_center' # (options already given in Reeb_Graph/scalar_args are shared)

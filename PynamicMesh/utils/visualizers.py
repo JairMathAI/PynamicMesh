@@ -1305,11 +1305,12 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
     else:
         print(f"[SUCCESS] Exported {saved_count} updated topological structures to: {target_folder}")
 
-def launch_reeb_viewer(mesh_files, reeb_files, scalar_files):
-    print("\nStarting interactive Reeb Graph orchestrator...")
+def launch_reeb_viewer(mesh_files, reeb_files, scalar_files, graph='reeb'):
+    graph_label = "Reeb" if graph == 'reeb' else "Morse-Smale critical-point"
+    print(f"\nStarting interactive {graph_label} graph orchestrator...")
     
     pl = pv.Plotter(shape=(1, 2))
-    pl.title = "Cell Topology Evolution (Reeb Graphs)"
+    pl.title = f"Cell Topology Evolution ({graph_label} Graphs)"
     state = {'frame': 0, 'total': len(mesh_files)}
     pl.add_axes()
     
@@ -1341,9 +1342,20 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files):
         meshn.point_data['Dynamic_Scalar'] = scalar_array
         
         with open(reeb_files[frame_idx], 'rb') as f:
-            graph = pickle.load(f)
+            graph_obj = pickle.load(f)
         
-        reeb_pv = create_reeb_polydata(graph)
+        reeb_pv = create_reeb_polydata(graph_obj)
+        if graph == 'mscomplex' and reeb_pv.n_points > 0:
+            # nodes at the vertices of the displayed mesh (on the surface, same rotation); the centre node
+            # (vertex -1) at the mean of the displayed points
+            nodes = list(graph_obj.nodes(data=True))
+            vidx = np.array([int(d.get('vertex', -1)) for _, d in nodes])
+            pts = np.array(reeb_pv.points, dtype=float)
+            ok = (vidx >= 0) & (vidx < meshn.n_points)
+            pts[ok] = np.asarray(meshn.points)[vidx[ok]]
+            pts[~ok] = np.asarray(meshn.points).mean(axis=0)
+            reeb_pv.points = pts
+            reeb_pv.point_data['type_code'] = np.array([{'minimum': 0, 'saddle': 1, 'maximum': 2}.get(str(d.get('type', '')), 3) for _, d in nodes])
         
         pl.subplot(0, 0)
         pl.add_mesh(meshn, scalars='Dynamic_Scalar', cmap='viridis', name='z_mesh', 
@@ -1355,9 +1367,17 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files):
         pl.add_mesh(meshn, color='white', opacity=0.25, name='ghost_mesh', render=False)
         
         if reeb_pv.n_points > 0:
-            spheres = reeb_pv.glyph(geom=pv.Sphere(radius=node_radius), scale=False, orient=False)
+            spheres = reeb_pv.glyph(geom=pv.Sphere(radius=node_radius * (1.6 if graph == 'mscomplex' else 1.0)), scale=False, orient=False)
             fvals = reeb_pv.point_data['f_value'] if 'f_value' in reeb_pv.point_data else None
-            if fvals is not None and np.all(np.isfinite(fvals)) and np.ptp(fvals) > 0:
+            if graph == 'mscomplex':
+                # colour by critical point type (red max, blue min, green saddle, gold centre)
+                import matplotlib.colors as mc
+                type_cols = np.array([mc.to_rgb(c) for c in ('royalblue', 'limegreen', 'red', 'gold')])
+                rep = spheres.n_points // max(reeb_pv.n_points, 1)
+                cols = type_cols[reeb_pv.point_data['type_code']]
+                spheres.point_data['rgb'] = (np.repeat(cols, rep, axis=0)[:spheres.n_points] * 255).astype(np.uint8)
+                pl.add_mesh(spheres, scalars='rgb', rgb=True, name='reeb_nodes', render=False)
+            elif fvals is not None and np.all(np.isfinite(fvals)) and np.ptp(fvals) > 0:
                 # Same colour map and range as the scalar field on the left, so a node's colour tells its level.
                 pl.add_mesh(spheres, scalars='f_value', cmap='viridis', clim=[float(scalar_array.min()), float(scalar_array.max())],
                             name='reeb_nodes', scalar_bar_args={'title': 'node level f'}, render=False)
@@ -1370,7 +1390,7 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files):
             else:
                 pl.remove_actor('reeb_edges')
 
-        pl.add_text(f"Level-Set Reeb Graph - Frame {frame_idx + 1}/{state['total']}", 
+        pl.add_text(f"{'Level-Set Reeb Graph' if graph == 'reeb' else 'Morse-Smale critical-point graph'} - Frame {frame_idx + 1}/{state['total']}", 
                     name='t2', font_size=10, position='upper_left')
     
     update_frame(0)
@@ -1400,25 +1420,64 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files):
                 position='lower_left', font_size=6, color='black')
     pl.show(full_screen=True)
 
-def visualize_reeb_graphs(mesh_folder_path, reeb_folder_path):
+def visualize_graphs(mesh_folder_path, graph_folder_path, graph='reeb'):
+    """
+    Graph-over-mesh viewer (scalar field on the left, graph on the right).
+      graph='reeb'      : Reeb graphs; Reeb_T####.pkl and Scalar_T####.npy live in the same folder
+                          (Results/<scene>/Reeb_Graphs) - unchanged behaviour of visualize_reeb_graphs.
+      graph='mscomplex' : critical-point graphs of the Morse-Smale complex (MSGraph_T####.pkl in
+                          Results/<scene>/MSComplexAnalysis/MS_Graphs); the scalar fields are read from
+                          the sibling folder MSComplexAnalysis/MS_Complex (Scalar_T####.npy) and the nodes
+                          are placed at their mesh vertices ('vertex' attribute).
+    """
     mesh_folder = Path(mesh_folder_path)
-    reeb_folder = Path(reeb_folder_path)
-    
-    obj_files = sorted([f for f in mesh_folder.iterdir() if f.is_file() and (f.suffix == '.obj' or f.suffix == '.mat')],key=natural_sort_key)
-    reeb_files = sorted([f for f in reeb_folder.iterdir() if f.is_file() and f.suffix == '.pkl'],key=natural_sort_key)
-    scalar_files = sorted([f for f in reeb_folder.iterdir() if f.is_file() and f.name.startswith('Scalar') and f.suffix == '.npy'],key=natural_sort_key)
-    
-    if not obj_files or not reeb_files or not scalar_files:
-        print("Error: Missing obj, pkl, or npy files for Reeb visualization.")
+    graph_folder = Path(graph_folder_path)
+    graph = str(graph).lower()
+    if graph not in ('reeb', 'mscomplex'):
+        raise ValueError("graph must be 'reeb' or 'mscomplex'")
+
+    obj_files = sorted([f for f in mesh_folder.iterdir() if f.is_file() and (f.suffix == '.obj' or f.suffix == '.mat')], key=natural_sort_key)
+    graph_files = sorted([f for f in graph_folder.iterdir() if f.is_file() and f.suffix == '.pkl'], key=natural_sort_key)
+    if graph == 'reeb':
+        scalar_folder = graph_folder
+    else:
+        # MS_Graphs and MS_Complex are siblings under MSComplexAnalysis (accept the root folder too)
+        root = graph_folder.parent if graph_folder.name == 'MS_Graphs' else graph_folder
+        scalar_folder = root / 'MS_Complex'
+        if graph_folder.name != 'MS_Graphs' and (root / 'MS_Graphs').is_dir():
+            graph_folder = root / 'MS_Graphs'
+            graph_files = sorted([f for f in graph_folder.iterdir() if f.is_file() and f.suffix == '.pkl'], key=natural_sort_key)
+    scalar_files = sorted([f for f in scalar_folder.iterdir() if f.is_file() and f.name.startswith('Scalar') and f.suffix == '.npy'],
+                          key=natural_sort_key) if scalar_folder.is_dir() else []
+
+    if not obj_files or not graph_files or not scalar_files:
+        print(f"Error: Missing obj, pkl, or npy files for the {graph} graph visualization "
+              f"(graphs: {graph_folder}, scalars: {scalar_folder}).")
         return
 
-    min_len = min(len(obj_files), len(reeb_files), len(scalar_files))
-    
-    launch_reeb_viewer(
-        [str(f) for f in obj_files[:min_len]], 
-        [str(f) for f in reeb_files[:min_len]],
-        [str(f) for f in scalar_files[:min_len]]
-    )
+    # pair graphs and scalars by frame number (the MS complex may start at frame 1 for map-dependent fields)
+    def frame_of(f):
+        m = re.search(r'T(\d+)', f.stem)
+        return int(m.group(1)) if m else None
+    scal_by_frame = {frame_of(f): f for f in scalar_files}
+    mesh_sel, graph_sel, scalar_sel = [], [], []
+    for gf in graph_files:
+        k = frame_of(gf)
+        if k is None:
+            continue
+        if k in scal_by_frame and k < len(obj_files):
+            mesh_sel.append(obj_files[k]); graph_sel.append(gf); scalar_sel.append(scal_by_frame[k])
+    if not graph_sel:   # no frame numbers in the names: fall back to positional pairing
+        min_len = min(len(obj_files), len(graph_files), len(scalar_files))
+        mesh_sel, graph_sel, scalar_sel = obj_files[:min_len], graph_files[:min_len], scalar_files[:min_len]
+
+    launch_reeb_viewer([str(f) for f in mesh_sel], [str(f) for f in graph_sel], [str(f) for f in scalar_sel],
+                       graph=graph)
+
+
+def visualize_reeb_graphs(mesh_folder_path, reeb_folder_path):
+    """Backward compatible alias of visualize_graphs(..., graph='reeb')."""
+    return visualize_graphs(mesh_folder_path, reeb_folder_path, graph='reeb')
 
 
 def visualize_obj_sequence(folder_path: str):
@@ -1461,3 +1520,293 @@ def visualize_obj_sequence(folder_path: str):
     
     update_frame(0)
     pl.show(full_screen=True)
+
+##################################################################################################################### Morse–Smale Complex ###############################################################################################################################
+MS_PALETTE = np.array([[0.12, 0.47, 0.71], [1.00, 0.50, 0.05], [0.17, 0.63, 0.17], [0.84, 0.15, 0.16], [0.58, 0.40, 0.74],
+                       [0.55, 0.34, 0.29], [0.89, 0.47, 0.76], [0.50, 0.50, 0.50], [0.74, 0.74, 0.13], [0.09, 0.75, 0.81],
+                       [0.68, 0.78, 0.91], [1.00, 0.73, 0.47], [0.60, 0.87, 0.54], [1.00, 0.60, 0.59], [0.77, 0.69, 0.84],
+                       [0.77, 0.61, 0.58], [0.97, 0.71, 0.82], [0.78, 0.78, 0.78], [0.86, 0.86, 0.55], [0.62, 0.85, 0.90],
+                       [0.55, 0.83, 0.78], [1.00, 1.00, 0.70], [0.75, 0.73, 0.85], [0.98, 0.50, 0.45], [0.50, 0.69, 0.83],
+                       [0.99, 0.71, 0.38], [0.70, 0.87, 0.41], [0.99, 0.80, 0.90], [0.85, 0.85, 0.85], [0.74, 0.50, 0.74],
+                       [0.80, 0.92, 0.77], [1.00, 0.93, 0.44]])
+MS_CP_COLORS = {"maximum": "red", "minimum": "royalblue", "saddle": "limegreen", "regular": "lightgrey", "lost": "black", "center": "gold"}
+
+
+def _ms_rot(pd_):
+    """Same cosmetic rotation as the Reeb viewer, applied to every polydata so they stay consistent."""
+    pd_.rotate_x(90, inplace=True)
+    pd_.rotate_z(90, inplace=True)
+    return pd_
+
+
+def _ms_palette(n):
+    """n visually distinct colours: the first 32 from MS_PALETTE, then golden-angle hues with cycling
+    saturation/lightness (no repetition, no warnings however many regions/tracks there are)."""
+    import colorsys
+    n = int(max(n, 1))
+    if n <= len(MS_PALETTE):
+        return MS_PALETTE[:n]
+    extra = []
+    for k in range(n - len(MS_PALETTE)):
+        h = (0.61803398875 * k) % 1.0
+        s_ = (0.55, 0.85, 0.7)[k % 3]
+        l_ = (0.5, 0.65, 0.38)[(k // 3) % 3]
+        extra.append(colorsys.hls_to_rgb(h, l_, s_))
+    return np.vstack([MS_PALETTE, np.array(extra)])
+
+
+def _ms_region_colors(labels, color_key, palette, boundary_edges=None):
+    """RGB per vertex from the region ids. color_key: region id -> colour index (track id when a lineage
+    is available, so a protrusion keeps its colour over time). If two *adjacent* regions received the
+    same colour (indices wrapping around the palette) the one with the larger id is moved to the
+    nearest free colour, so neighbouring regions are always distinguishable."""
+    labels = np.asarray(labels)
+    n = len(palette)
+    idx_of = {int(r): int(color_key.get(int(r), int(r))) % n for r in np.unique(labels)}
+    if boundary_edges is not None and len(boundary_edges):
+        a, b = labels[boundary_edges[:, 0]], labels[boundary_edges[:, 1]]
+        pairs = {(int(min(x, y)), int(max(x, y))) for x, y in zip(a, b) if x != y}
+        neigh = {}
+        for x, y in pairs:
+            neigh.setdefault(x, set()).add(y); neigh.setdefault(y, set()).add(x)
+        for r in sorted(idx_of):
+            used = {idx_of[q] for q in neigh.get(r, ())}
+            if idx_of[r] in used:
+                for shift in range(1, n):
+                    cand = (idx_of[r] + shift) % n
+                    if cand not in used:
+                        idx_of[r] = cand
+                        break
+    idx = np.array([idx_of[int(l)] for l in labels])
+    return np.asarray(palette)[idx]
+
+
+def launch_ms_viewer(mesh_files, ms_files, tracking_dir=None, lineage_csv=None):
+    """
+    Interactive viewer of the Morse–Smale segmentation.
+      Right / Left   : next / previous frame
+      m              : cycle the modality
+                       'segmentation'  : regions of the maxima (protrusions), boundaries (yellow) and
+                                         critical points (red max, blue min, green saddle)
+                       'correspondence': left = previous frame segmentation; right = current mesh coloured
+                                         with the previous regions transported by the functional map
+                                         (hard p2p or soft spectral transport), current boundaries on top
+                       'fates'         : current mesh with the images of the previous critical points
+                                         coloured by their fate (kept type / became saddle / minimum / regular)
+      s              : hard <-> soft transport (correspondence mode)
+      b / c / e      : toggle boundaries / critical points / mesh edges
+    Region colours are stable along a protrusion track when region_lineage.csv is available.
+    """
+    from PynamicMesh.core.SMComplex import MSComplex, create_ms_polydata, CP_TYPES
+    print("\nStarting interactive Morse–Smale viewer...")
+    n = len(mesh_files)
+    tracking_dir = Path(tracking_dir) if tracking_dir else None
+    # colour key: (frame, max vertex) -> track id  (stable colours along the lineage)
+    color_key = {}
+    if lineage_csv and Path(lineage_csv).exists():
+        ln = pd.read_csv(lineage_csv)
+        for _, r in ln.iterrows():
+            if r.curr_max_vertex >= 0:
+                color_key[(int(r.Time_Step), int(r.curr_max_vertex))] = int(r.curr_track_id)
+            if r.prev_max_vertex >= 0:
+                color_key[(int(r.Time_Step) - 1, int(r.prev_max_vertex))] = int(r.track_id)
+    cache = {}
+    ms_all = [MSComplex.from_pickle(f) for f in ms_files]
+    n_colors = max([len(ms.maxima) for ms in ms_all] + [max(color_key.values(), default=0) + 1, 32])
+    palette = _ms_palette(n_colors)
+
+    def load(i):
+        if i not in cache:
+            tm = mesh_mat2object(mesh_files[i])
+            ms = ms_all[i]
+            mesh, bnd, _ = create_ms_polydata(ms, tm.vertices, tm.faces)
+            _ms_rot(mesh); _ms_rot(bnd)
+            # critical points at the vertices of the displayed (rotated) mesh: always on the surface
+            idx = ms.critical.vertex.to_numpy(dtype=np.int64)
+            cps = pv.PolyData(mesh.points[idx]) if len(idx) else pv.PolyData()
+            if len(idx):
+                cps.point_data["type_code"] = np.array([CP_TYPES.index(t) for t in ms.critical["type"]])
+                cps.point_data["vertex"] = idx
+            cache[i] = (ms, mesh, bnd, cps)
+        return cache[i]
+
+    def key_for(frame, ms):
+        """region id -> colour index: the track id when known, else the rank of the maximum in the frame."""
+        return {int(m): color_key.get((frame, int(m)), k) for k, m in enumerate(ms.maxima)}
+
+    pl = pv.Plotter(shape=(1, 2))
+    pl.title = "Morse–Smale complex: protrusion segmentation and correspondence"
+    modes = ["segmentation", "correspondence", "fates"]
+    state = {"frame": 0, "mode": 0, "soft": False, "bnd": True, "cps": True, "edges": False}
+    pl.add_axes()
+
+    def draw_mesh(sub, mesh, colors, name, opacity=1.0):
+        pl.subplot(0, sub)
+        m = mesh.copy()
+        m.point_data["rgb"] = (np.asarray(colors) * 255).astype(np.uint8)
+        pl.add_mesh(m, scalars="rgb", rgb=True, name=name, smooth_shading=True, opacity=opacity,
+                    show_edges=state["edges"], edge_color="black", line_width=0.3, render=False)
+
+    def draw_boundary(sub, bnd, name, color="yellow", radius=None):
+        pl.subplot(0, sub)
+        pl.remove_actor(name)
+        if state["bnd"] and bnd.n_lines > 0:
+            pl.add_mesh(bnd.tube(radius=radius), color=color, name=name, render=False)
+
+    def draw_cps(sub, cps, name, radius, colors=None):
+        pl.subplot(0, sub)
+        pl.remove_actor(name)
+        if state["cps"] and cps.n_points > 0:
+            sph = cps.glyph(geom=pv.Sphere(radius=radius), scale=False, orient=False)
+            if colors is None:
+                cols = np.array([matplotlib_color(MS_CP_COLORS[CP_TYPES[int(t)]]) for t in cps.point_data["type_code"]])
+            else:
+                cols = np.asarray(colors)
+            # glyph repeats the points: expand colours per glyph vertex
+            rep = sph.n_points // max(cps.n_points, 1)
+            sph.point_data["rgb"] = (np.repeat(cols, rep, axis=0)[:sph.n_points] * 255).astype(np.uint8)
+            pl.add_mesh(sph, scalars="rgb", rgb=True, name=name, render=False)
+
+    def matplotlib_color(c):
+        import matplotlib.colors as mc
+        return np.array(mc.to_rgb(c))
+
+    def clear_all():
+        for sub in (0, 1):
+            pl.subplot(0, sub)
+            for nm in ("mesh", "bnd", "cps", "bnd2", "cps2", "txt", "legend"):
+                pl.remove_actor(nm)
+            try:
+                pl.remove_scalar_bar()
+            except Exception:
+                pass
+
+    def update(i):
+        clear_all()
+        ms, mesh, bnd, cps = load(i)
+        diag = np.linalg.norm(np.array(mesh.bounds[1::2]) - np.array(mesh.bounds[::2]))
+        r_node, r_edge = diag * 0.010, diag * 0.002
+        mode = modes[state["mode"]]
+        key_c = key_for(i, ms)
+        col_c = _ms_region_colors(ms.label_max, key_c, palette, ms.boundary_edges)
+        c = ms.counts()
+        if mode == "segmentation" or i == 0:
+            draw_mesh(0, mesh, col_c, "mesh")
+            draw_boundary(0, bnd, "bnd", radius=r_edge)
+            draw_cps(0, cps, "cps", r_node)
+            pl.subplot(0, 0)
+            pl.add_text(f"Morse–Smale segmentation - Frame {i + 1}/{n}\nmax {c['n_max']}  min {c['n_min']}  saddle {c['n_saddle']}  "
+                        f"regions {len(ms.maxima)}  (persistence {ms.persistence_threshold / ms.meta['field_range']:.2f})",
+                        name="txt", font_size=9, position="upper_left")
+            # right: scalar field with the critical points
+            pl.subplot(0, 1)
+            m2 = mesh.copy()
+            pl.add_mesh(m2, scalars="scalar", cmap="viridis", name="mesh", smooth_shading=True, show_edges=state["edges"],
+                        scalar_bar_args={"title": ms.meta.get("scalar_method", "f")}, render=False)
+            draw_boundary(1, bnd, "bnd2", color="white", radius=r_edge)
+            draw_cps(1, cps, "cps2", r_node)
+            pl.add_text("Scalar field of the complex", name="txt", font_size=9, position="upper_left")
+            return
+        ms_p, mesh_p, bnd_p, cps_p = load(i - 1)
+        key_p = key_for(i - 1, ms_p)
+        col_p = _ms_region_colors(ms_p.label_max, key_p, palette, ms_p.boundary_edges)
+        draw_mesh(0, mesh_p, col_p, "mesh")
+        draw_boundary(0, bnd_p, "bnd", radius=r_edge)
+        draw_cps(0, cps_p, "cps", r_node)
+        pl.subplot(0, 0)
+        pl.add_text(f"Frame {i}/{n} (previous)", name="txt", font_size=9, position="upper_left")
+        npz = tracking_dir / f"mapped_T{i - 1:04d}_T{i:04d}.npz" if tracking_dir else None
+        data = np.load(npz, allow_pickle=True) if (npz is not None and npz.exists()) else None
+        if data is None:
+            draw_mesh(1, mesh, col_c, "mesh")
+            draw_boundary(1, bnd, "bnd2", radius=r_edge)
+            draw_cps(1, cps, "cps2", r_node)
+            pl.subplot(0, 1)
+            pl.add_text(f"Frame {i + 1}/{n}: no tracking data (run with ms_track_regions=True)", name="txt", font_size=9, position="upper_left")
+            return
+        if mode == "correspondence":
+            use_soft = state["soft"] and data["soft_label"].size > 0
+            lab = data["soft_label"] if use_soft else data["hard_label"]
+            col_m = _ms_region_colors(lab, key_p, palette)     # previous colours transported to the current mesh
+            if use_soft and data["soft_confidence"].size:
+                conf = np.clip(data["soft_confidence"], 0, 1)[:, None]
+                col_m = conf * col_m + (1 - conf) * 0.85          # fade uncertain vertices
+            draw_mesh(1, mesh, col_m, "mesh")
+            draw_boundary(1, bnd, "bnd2", radius=r_edge)        # current segmentation boundaries on top
+            draw_cps(1, cps, "cps2", r_node)
+            iou = data["IoU"]
+            pl.subplot(0, 1)
+            pl.add_text(f"Frame {i + 1}/{n}: previous regions transported by the FM "
+                        f"({'soft spectral transport' if use_soft else 'hard p2p transport'})\n"
+                        f"matched {len(data['match_prev'])}/{len(data['prev_ids'])} regions, mean IoU "
+                        f"{np.mean([iou[np.where(data['prev_ids'] == a)[0][0], np.where(data['curr_ids'] == b)[0][0]] for a, b in zip(data['match_prev'], data['match_curr'])]) if len(data['match_prev']) else 0:.2f}"
+                        f"\nyellow = current boundaries; colours = previous regions (s: hard/soft)",
+                        name="txt", font_size=9, position="upper_left")
+        else:  # fates
+            draw_mesh(1, mesh, 0.55 * col_c + 0.45, "mesh")
+            draw_boundary(1, bnd, "bnd2", radius=r_edge)
+            img = data["image_vertex"]; tn = data["cp_type_next"]; tp = data["cp_type_prev"]; gr = data["cp_growth"]
+            ok = img >= 0
+            pts = pv.PolyData(mesh.points[img[ok]]) if ok.any() else pv.PolyData()
+            cols = np.array([matplotlib_color(MS_CP_COLORS.get(str(t), "black")) for t in tn[ok]]) if ok.any() else None
+            if pts.n_points:
+                pts.point_data["type_code"] = np.zeros(pts.n_points, dtype=int)
+                draw_cps(1, pts, "cps2", r_node * 1.3, colors=cols)
+            counts = {}
+            for a, b in zip(tp, tn):
+                counts[(str(a), str(b))] = counts.get((str(a), str(b)), 0) + 1
+            summary = "  ".join(f"{a[:3]}->{b[:3]}:{k}" for (a, b), k in sorted(counts.items()))
+            n_grow = int(np.sum((tp == "maximum") & (gr == "growing"))); n_ret = int(np.sum((tp == "maximum") & (gr == "retracting")))
+            pl.subplot(0, 1)
+            pl.add_text(f"Frame {i + 1}/{n}: fate of the previous critical points (colour = type reached)\n"
+                        f"{summary}\nprotrusions growing {n_grow} / retracting {n_ret}",
+                        name="txt", font_size=9, position="upper_left")
+
+    def step(d):
+        state["frame"] = int(np.clip(state["frame"] + d, 0, n - 1)); update(state["frame"]); pl.render()
+
+    def toggle(k):
+        def _f():
+            if k == "mode":
+                state["mode"] = (state["mode"] + 1) % len(modes)
+            else:
+                state[k] = not state[k]
+            update(state["frame"]); pl.render()
+        return _f
+
+    for k_ in ("b", "c", "e", "m", "s"):          # drop pyvista's defaults on these keys
+        try:
+            pl.clear_events_for_key(k_)
+        except Exception:
+            pass
+    pl.add_key_event("Right", lambda: step(1))
+    pl.add_key_event("Left", lambda: step(-1))
+    pl.add_key_event("m", toggle("mode"))
+    pl.add_key_event("s", toggle("soft"))
+    pl.add_key_event("b", toggle("bnd"))
+    pl.add_key_event("c", toggle("cps"))
+    pl.add_key_event("e", toggle("edges"))
+    update(0)
+    pl.subplot(0, 0); pl.reset_camera(); pl.subplot(0, 1); pl.reset_camera(); pl.link_views()
+    pl.subplot(0, 0)
+    pl.add_text("Controls: Right/Left frame | m modality (segmentation / correspondence / fates) | s hard-soft transport | b boundaries | c critical points | e edges",
+                position="lower_left", font_size=6, color="black")
+    pl.show(full_screen=True)
+
+
+def visualize_ms_complex(mesh_folder_path, ms_root_path):
+    """Launch the Morse–Smale viewer. ``ms_root_path`` is Results/<scene>/MSComplexAnalysis."""
+    mesh_folder = Path(mesh_folder_path)
+    ms_root = Path(ms_root_path)
+    ms_dir = ms_root / "MS_Complex" if (ms_root / "MS_Complex").is_dir() else ms_root
+    obj_files = sorted([f for f in mesh_folder.iterdir() if f.is_file() and f.suffix in (".obj", ".mat")], key=natural_sort_key)
+    ms_files = sorted([f for f in ms_dir.iterdir() if f.is_file() and f.name.startswith("MS_T") and f.suffix == ".pkl"], key=natural_sort_key)
+    if not obj_files or not ms_files:
+        print("Error: missing meshes or MS_T####.pkl files for the Morse–Smale visualization.")
+        return
+    frames = [int(re.search(r"T(\d+)", f.stem).group(1)) for f in ms_files]
+    mesh_sel = [obj_files[k] for k in frames if k < len(obj_files)]
+    tracking = ms_root / "Region_tracking"
+    launch_ms_viewer([str(f) for f in mesh_sel], [str(f) for f in ms_files[:len(mesh_sel)]],
+                     tracking_dir=tracking if tracking.is_dir() else None,
+                     lineage_csv=tracking / "region_lineage.csv" if (tracking / "region_lineage.csv").exists() else None)

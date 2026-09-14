@@ -63,16 +63,47 @@ def extract_yaml(config_path):
     return config
 
 
-def extract_kwargs(fm_cfg, rg_cfg, bg_cfg, gs_cfg=None):
+# Sections of a (scene) configuration and the extract_kwargs argument they map to.
+CONFIG_SECTIONS = {"Functional_Map": "fm_cfg", "Reeb_Graph": "rg_cfg", "Basic_Geometry": "bg_cfg",
+                   "Graph_similarity": "gs_cfg", "MS_Complex": "ms_cfg"}
+# Advanced options of the Morse–Smale region tracker (RegionTracker); accepted nested in
+# `ms_tracker_params` or flat inside the MS_Complex section.
+MS_TRACKER_KEYS = ("iou_threshold", "dominance", "fate_radius", "growth_tolerance", "ghost_horizon")
+
+
+def kwargs_from_config(cfg):
+    """
+    run_pipeline keyword arguments from a whole configuration mapping (the yaml of one scene or the
+    single-scene yaml): every known section (Functional_Map, Reeb_Graph, Basic_Geometry,
+    Graph_similarity, MS_Complex) is passed to extract_kwargs; the `Data` section is ignored.
+    Nested mappings (fm_params, ms_tracker_params) are kept as dictionaries.
+    """
+    cfg = cfg or {}
+    sections = {arg: dict(cfg.get(name, {}) or {}) for name, arg in CONFIG_SECTIONS.items()}
+    fm_params = sections["fm_cfg"].pop("fm_params", None)
+    ms_tracker = sections["ms_cfg"].pop("ms_tracker_params", None)
+    kwargs = extract_kwargs(**sections)
+    if fm_params:
+        kwargs["fm_params"] = dict(fm_params)
+    if ms_tracker:
+        kwargs["ms_tracker_params"] = dict(ms_tracker)
+    return kwargs
+
+
+def extract_kwargs(fm_cfg, rg_cfg, bg_cfg, gs_cfg=None, ms_cfg=None):
     """
     Helper function to extract arguments from the config dictionaries.
 
     Known keys receive defaults; every other key of the sections is forwarded unchanged, so the
     advanced functional-map options (nested `fm_params` or flat `symmetry_mode`, `landmark_params`,
-    `descr_params`, `fit_params`, `n_descr`, `subsample_step`, `refine`, `dt`, `verbose`) and the
-    scalar-field options of the Reeb graph reach run_pipeline (which normalizes them).
+    `descr_params`, `fit_params`, `n_descr`, `subsample_step`, `refine`, `dt`, `verbose`), the
+    scalar-field options of the Reeb graph and the Morse–Smale options (`MS_Complex` section:
+    compute_mscomplex, ms_scalar, ms_persistence, ms_min_region_area, mscomplex_graph, ms_graph_type,
+    ms_track_regions, ms_graph_metrics and `ms_tracker_params` nested or flat) reach run_pipeline
+    (which normalizes them).  ms_cfg is optional so that older callers keep working; prefer
+    kwargs_from_config(config) which handles every section at once.
     """
-    fm_cfg, rg_cfg, bg_cfg, gs_cfg = (dict(c or {}) for c in (fm_cfg, rg_cfg, bg_cfg, gs_cfg))
+    fm_cfg, rg_cfg, bg_cfg, gs_cfg, ms_cfg = (dict(c or {}) for c in (fm_cfg, rg_cfg, bg_cfg, gs_cfg, ms_cfg))
 
     k_eigen = fm_cfg.get("k_eigenfunctions", (10, 10))
     
@@ -119,17 +150,41 @@ def extract_kwargs(fm_cfg, rg_cfg, bg_cfg, gs_cfg=None):
 
         # Graph Similarity Settings
         "graph_sim": gs_cfg.get("graph_sim", True),
-        "graph_metrics": gs_cfg.get("graph_metrics",'all')
+        "graph_metrics": gs_cfg.get("graph_metrics",'all'),
+
+        # Morse–Smale Complex Settings (results in Results/<scene>/MSComplexAnalysis)
+        "compute_mscomplex": ms_cfg.get("compute_mscomplex", False),
+        "ms_scalar": ms_cfg.get("ms_scalar", None),              # None -> the Reeb scalar field (reused)
+        "ms_persistence": ms_cfg.get("ms_persistence", 0.05),
+        "ms_min_region_area": ms_cfg.get("ms_min_region_area", 0.0),
+        "mscomplex_graph": ms_cfg.get("mscomplex_graph", False),
+        "ms_graph_type": ms_cfg.get("ms_graph_type", "star"),
+        "ms_track_regions": ms_cfg.get("ms_track_regions", True),
+        "ms_graph_metrics": ms_cfg.get("ms_graph_metrics", gs_cfg.get("graph_metrics", 'all')),
     }
 
+    # Tracker options: nested `ms_tracker_params` and/or flat keys of the MS_Complex section.
+    ms_tracker = dict(ms_cfg.get("ms_tracker_params", {}) or {})
+    for key in MS_TRACKER_KEYS:
+        if key in ms_cfg and key not in ms_tracker:
+            ms_tracker[key] = ms_cfg[key]
+    if ms_tracker:
+        kwargs["ms_tracker_params"] = ms_tracker
+
+    # Scalar-field options: shared by the Reeb graph and the Morse–Smale complex (same get_scalar_field);
+    # options given under MS_Complex/scalar_args complete (do not override) the Reeb ones.
     scalar_args = rg_cfg.get("scalar_args", {})
     if isinstance(scalar_args, dict):
         kwargs.update(scalar_args)
+    ms_scalar_args = ms_cfg.get("scalar_args", {})
+    if isinstance(ms_scalar_args, dict):
+        for key, value in ms_scalar_args.items():
+            kwargs.setdefault(key, value)
 
     # Pass-through of every other key (fm_params, flat FM options, extra scalar-field options, ...).
-    for cfg in (fm_cfg, rg_cfg, bg_cfg, gs_cfg):
+    for cfg in (fm_cfg, rg_cfg, bg_cfg, gs_cfg, ms_cfg):
         for key, value in cfg.items():
-            if key == "scalar_args" or key in kwargs:
+            if key in ("scalar_args", "ms_tracker_params") or key in kwargs or key in MS_TRACKER_KEYS:
                 continue
             kwargs[key] = value
 
@@ -345,5 +400,3 @@ def optimize_param(meshn_1, meshn):
     else:
         return None 
     return (nit, step)
-
- 
