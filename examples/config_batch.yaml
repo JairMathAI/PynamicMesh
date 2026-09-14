@@ -44,6 +44,18 @@ scene1:
       graph_sim: True
       graph_metrics: all
 
+  MS_Complex:
+    compute_mscomplex: True
+    ms_scalar: 'dist_centroid'        # protrusion segmentation
+    ms_persistence: 0.08
+    mscomplex_graph: True
+    ms_graph_type: 'star+adjacency'
+    ms_track_regions: True
+    ms_tracker_params:
+      iou_threshold: 0.25
+      dominance: 0.5
+      ghost_horizon: 6
+
 # scene2: precomputed (manually selected) landmarks only; FM options written flat (equivalent to nesting them in fm_params)
 scene2:
   Basic_Geometry:
@@ -76,6 +88,15 @@ scene2:
       graph_sim: True
       graph_metrics: all
 
+  MS_Complex:                         # complex of the Reeb field itself (heat_diffusion, reused), tracker options flat
+    compute_mscomplex: True
+    ms_scalar: null
+    ms_persistence: 0.05
+    mscomplex_graph: False
+    ms_track_regions: True
+    fate_radius: 0.05
+    growth_tolerance: 0.003
+
 # scene3: no landmarks, symmetry-aware descriptors only (XYZ requested explicitly in the descriptor string)
 scene3:
   Basic_Geometry:
@@ -106,3 +127,6 @@ scene3:
   Graph_similarity:
       graph_sim: True
       graph_metrics: all
+
+  MS_Complex:                         # Morse–Smale analysis switched off for this scene
+    compute_mscomplex: False

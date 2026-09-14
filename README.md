@@ -247,11 +247,7 @@ Given two consecutive time step meshes $M_{t_{i-1}}$ and $M_{t_{i}}$, we can thi
 
 The goal is to find a representation of the unknown bijective transformation function $\varphi_n : M_{t_{i-1}} \to M_{t_{i}}$ that describes how the mesh is transformed in space.
 
-<img src="./assets/FM.PNG" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
-
 We can use a scalar function defined over each mesh $\psi_{t_{i-1}}: M_{t_{i-1}} \to \mathbb{R}$ and $\psi_{t_i}: M_{t_i} \to \mathbb{R}$ which produces the relation $\psi_{t_i} = \psi_{t_{i-1}} \circ \varphi_n^{-1} = \psi_{t_{i-1}}(\varphi_n^{-1})$.
-
-<img src="./assets/scalar_map.PNG" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
 
 In our case we use as descriptors the point signatures built from the spectrum of the Laplace-Beltrami operator: for a spectral filter $g$ the signature of a point is $\displaystyle S_g(x) = \sum_k g(\lambda_k)\,\phi_k(x)^2$. Three families of filters are available, each evaluated at `n_descr` scales:
 
@@ -271,11 +267,8 @@ $\nu$ governs the smoothness of the resulting field.
 
 These kernels respect the surface geometry of the shape. Mathematically, they generalize the Laplace-Beltrami operator's spectral properties via the relationship with its eigenvalues. Any weighted sum of these families can be used as descriptor (see <b>Functional Map Parameters</b>), together with two <b>extrinsic</b> families that are aware of the symmetries of the shape (<b>XYZ</b>, <b>NRM</b>; see <b>Symmetry-Aware Mapping</b>).
 
-<div style="display: flex; gap: 10px; flex-wrap: wrap;">
-  <img src="./assets/wave_eq.gif" style="max-width: 100%; height: auto;"/>
-  <img src="./assets/heat_eq.gif" style="max-width: 100%; height: auto;"/>
-</div>
 
+<img src="./assets/scalar_map.gif" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
 
 
 The composition $\psi_{t_{i-1}}(\varphi_n^{-1})$ induce a linear functional, such that for every function $f:M_{t_{i-1}} \to \mathbb{R}$ we have $\mathcal{F}_{\varphi_n}(f) = f(\varphi_n^{-1})$, so we have the functional transformation $\mathcal{F}_{\varphi_n} : \mathcal{L}(M_{t_{i-1}},\mathbb{R}) \to \mathcal{L}(M_{t_{i}},\mathbb{R})$ where the task to find $\varphi_n$ now means finding a representation for the functional $\mathcal{F}_{\varphi_n}$.
@@ -320,6 +313,9 @@ $$L\Phi=W\Lambda\Phi$$
 
 Only for the first $k$ eigenvectors we do not compute all the eigenvectors (which would be computationally expensive). Since functional maps typically work on the first $k$ "low-frequency" eigenfunctions (the "spectral footprint").
 
+<img src="./assets/eigenfunction.gif" style="max-width: 100%; height: auto; display: block; margin: 0 auto;"/>
+
+
 Once solved, each column $\phi_j$​ of the matrix $\Phi$ contains the values of the $j$-th eigenfunction at every vertex of the mesh.
 
 We can obtain this matrix for the $t_{i-1}$ mesh  $\Phi^{M_{t_{i-1}}}$ and the $t_i$ mesh $\Phi^{M_{t_{i}}}$ to obtain the respective basis from the domain and the codomain of $\varphi_n$.
@@ -349,6 +345,10 @@ The functional map matrix $\mathcal{F}_{\varphi_n} = C_{t_{i-1} \to t_{i}} \in \
 $$
 \min_{C} E(C) = \underbrace{\lambda_{desc}\sum_{j} w_j \sum_{m \in j} \| C A_m - B_m \|^2}_{E_{desc}} + \underbrace{\lambda_{reg} \| C \Lambda_1 - \Lambda_2 C \|^2}_{E_{reg}} + \underbrace{\lambda_{comm} \sum_{m} \| C D^{1}_m - D^{2}_m C \|^2}_{E_{comm}} + \underbrace{\lambda_{orient} \sum_{m} \| C G^{1}_m - G^{2}_m C \|^2}_{E_{orient}}
 $$
+
+
+<img src="./assets/optifm.gif" style="max-width: 100%; height: auto; display: block; margin: 0 auto;"/>
+
 
 Were:
 
@@ -1313,13 +1313,13 @@ With these files, we can visualize the evolution of the field and the graph over
 ```python 
 from PynamicMesh.core.pipelines import run_pipeline
 from PynamicMesh.core.reeb_graph import graph_time_analysis
-from PynamicMesh.utils.visualizers import  visualize_reeb_graphs
+from PynamicMesh.utils.visualizers import  visualize_graphs
 
 print('Executing modeling ...')
 run_pipeline(base_mesh_path, compute_reeb=True, bins=30 , reeb_scalar='geodesic', vertex_ref_index=[4896])
 
 print('Reeb visualizations...') 
-visualize_reeb_graphs(mesh_path, reeb_path)
+visualize_graphs(mesh_path, reeb_path,graph='reeb')
 ```
 
 <img src="./assets/RG_view.gif" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
@@ -1536,8 +1536,347 @@ run_batch(config,path_str)
 </details>
 
 
+
+<details>
+<summary><strong><span style="font-size:25px;">Morse–Smale Complex </span></strong></summary>
+
+The Reeb graph summarises *how many* parts a shape has at every level of a scalar function. The Morse–Smale complex answers the complementary question: *where* are the peaks, pits and passes of that function on the surface, and which patch of surface belongs to each peak. Applied to a cell with a field such as the distance to the centre of mass, every peak is the tip of a protrusion and the patch flowing up to it is that protrusion's territory. Following peaks and territories through the functional maps of the pipeline turns a sequence of meshes into a story of protrusions that grow, shrink, split, merge, appear, flatten out or even invert into indentations.
+
+<details>
+<summary><span style="font-size:23px;">General Overview</span></summary>
+
+Generailzation idea for classic loca minima/maxima/saddle points finding, on calculus a function $f$ have a critical point $p$ if the derivatie on $p$ is zero $(\nabla f(p) = 0)$ the we can use the second derivative criteria to determine if the current poin is a $M$ local maximum $(\nabla^2 f(p) < 0)$ , $m$ local minimum $(\nabla^2 f(p) > 0)$ or a $S$ saddle point.
+
+<img src="./assets/local_points.gif" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
+
+Now we can extend the idea using a scalar field function over the mesh $f:M\to\mathbb{R}$ that indicate the travel over the mesh, and with the same criteria find the local maximums, minimus and saddle points over the mesh allowing us to generate a segmentation of the mesh trought the connection of critical points (Morse–Smale Complex).
+
+<img src="./assets/MSComplexes.gif" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
+
+For an small open ball around the critical point  $\mathbb{B}_{\varepsilon} (p)$ (a small region of the surface arount the point) whe have that depending of the nature of the point it can look like a parabolid or hyperbolic paraboloid $\displaystyle \mathbb{B}_{\varepsilon} (p) \cong \begin{cases}x^2+y^2-z-1=0&\text{ minimum }\\-x^2-y^2-z-1=0&\text{ maximum }\\x^2-y^2\pm z-1=0&\text{ saddle }\end{cases}$, providing a tool to track the changes of those points.
+
+<img src="./assets/Critical_equiv.gif" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
+
+
+</details>
+
+<details>
+<summary><span style="font-size:23px;">Theoretical Description</span></summary>
+
+<details>
+<summary><span style="font-size:21px;">Critical points of a function on a mesh</span></summary>
+
+Consider a scalar field $f:M\to\mathbb{R}$ on a closed triangle mesh, linear inside every triangle. Ties are broken by the vertex index, so all values can be treated as distinct. Around a vertex $v$ its neighbours form a ring (the *link*); split it into the vertices where $f<f(v)$ (lower link) and where $f>f(v)$ (upper link). Counting how many times the ring crosses from one side to the other classifies $v$ (Banchoff's piecewise-linear Morse theory):
+
+$$
+\#\text{crossings}=\begin{cases}
+0,\ \text{all neighbours lower} & \text{maximum (peak)}\\
+0,\ \text{all neighbours higher} & \text{minimum (pit)}\\
+2 & \text{regular point}\\
+2k,\ k\ge 2 & \text{saddle of multiplicity } k-1\ (\text{pass})
+\end{cases}
+$$
+
+The computation is done for all vertices at once through the link edges of the incident triangles. On a closed surface without holes (genus 0) the counts always satisfy the **Euler relation**
+
+$$\#\text{minima}-\#\text{saddles}+\#\text{maxima}=2,$$
+
+which the module checks on every frame both before and after simplification.
+
+</details>
+
+<details>
+<summary><span style="font-size:21px;">Regions: ascending and descending manifolds</span></summary>
+
+From every vertex, follow the neighbour with the steepest ascent, $\arg\max_j (f_j-f_i)/|\mathbf{x}_j-\mathbf{x}_i|$, until a maximum is reached. All vertices ending at the same maximum $m$ form its **descending manifold** $D(m)$ — the territory of that peak, the coloured patch of the viewer. Following the steepest descent instead gives the **ascending manifolds** $A(p)$ of the minima. The intersections $D(m)\cap A(p)$ are the cells of the Morse–Smale complex: patches of surface where the field flows from a single pit to a single peak. The pass between two neighbouring territories is a saddle. The paths are compressed with pointer jumping, so the segmentation of a mesh with tens of thousands of vertices takes a fraction of a second.
+
+</details>
+
+<details>
+<summary><span style="font-size:21px;">Persistence: telling protrusions from noise</span></summary>
+
+Measured surfaces have small bumps everywhere, and each one is a mathematical maximum. Topological persistence ranks them by importance. Sweep the surface from the highest value downwards (a super-level filtration): every time a new peak is met a new component is born, and when the sweep reaches the pass joining two components the *lower* of their two peaks dies. The **persistence** of that peak is
+
+$$\text{pers}(m)=f(m)-f(s),$$
+
+the height of the peak above the pass $s$ that connects it to a higher neighbour; the global maximum never dies ($\text{pers}=\infty$). The same sweep upwards ranks the minima. A peak with persistence below a threshold $\tau$ (a fraction of the field range) is a ripple: its territory is merged into the territory of the peak that killed it, following the chain of merges until a surviving peak. The saddles of the simplified complex are the passes of the surviving pairs, which keeps the Euler relation exact.
+
+Persistence is also the natural **height of a protrusion** in the units of the field: a peak with $\text{pers}=0.3$ on a `dist_centroid` field stands $0.3$ length units above the pass to its neighbour. Its evolution in time is reported for every tracked protrusion.
+
+</details>
+
+<details>
+<summary><span style="font-size:21px;">Correspondence of regions through the functional map</span></summary>
+
+Between consecutive frames $t$ and $t+1$ the pipeline provides the functional map $C$ and the point-to-point map $\pi$ that sends every vertex of frame $t+1$ to a vertex of frame $t$. Two transports of the segmentation of frame $t$ onto the mesh of frame $t+1$ are used:
+
+<b>Hard transport.</b> A vertex of frame $t+1$ receives the region of the vertex it is matched to, $L_{t\to t+1}(j)=L_t(\pi(j))$.
+
+<b>Soft transport.</b> The indicator function $\mathbb{1}_R$ of every region is transported as a function, in the spirit of the original functional-map framework: with $\Phi_t,\Phi_{t+1}$ the Laplace–Beltrami eigenbases and $A_t$ the vertex areas,
+
+$$g_R=\Phi_{t+1}\,C\,\Phi_t^{\top}A_t\,\mathbb{1}_R ,$$
+
+which gives every vertex of frame $t+1$ a smooth degree of membership to each region of frame $t$; the largest membership is the soft label and its share of the total is a confidence. The viewer can display either transport, and the agreement between them is reported.
+
+<b>Matching.</b> The overlap $O_{RS}$ between a transported region $R$ and a current region $S$ is the surface area they share. Regions are paired by maximising the area-weighted intersection-over-union, $\text{IoU}_{RS}=O_{RS}/(|R'|+|S|-O_{RS})$, with the Hungarian algorithm, a pair being accepted above `iou_threshold`. The unpaired regions are related by **dominant overlaps**: a current region whose largest contributor is $R$ (and covers more than the `dominance` fraction of it) is a *split* child of $R$; a previous region that mostly flows into a current region $S$ paired with another region has been *merged* (absorbed) into $S$; regions with no dominant relation are *births* and *deaths*. Every protrusion receives a persistent **track id** through these links (its lineage).
+
+</details>
+
+<details>
+<summary><span style="font-size:21px;">Fate of the critical points and multi-frame trajectories</span></summary>
+
+Every critical point of frame $t$ is carried to frame $t+1$ through the maps (the pre-image of $\pi$ when available, otherwise the forward map derived from $C$). The type of the surface at the arrival point is then decided with criteria that are robust to the wandering of an extremum on a flat top:
+
+* a **maximum** whose image lies inside the region matched to its own region is still a maximum (the exact vertex of the peak may move, the protrusion has not changed);
+* a point is "at the top" of a protrusion or "at the bottom" of a pit if its value is within half the persistence threshold of the maximum of its territory (respectively the minimum of its basin);
+* a **saddle** persists when the two regions it separates are both matched and still share a boundary (their pass);
+* otherwise the type is that of the nearest critical point within `fate_radius` along the surface, or *regular* if there is none.
+
+For every extremum the module also measures the **displacement of its image along the surface normal** of frame $t$ (positive = outward = the protrusion grows, negative = it retracts), the tangential displacement, the change of the field value and rank, of the persistence and of the region area.
+
+Because a slow inversion passes through a flat intermediate state, each critical point is additionally **followed for several frames** even after it has become regular (a *ghost* that tracks the material point of the original vertex for `ghost_horizon` frames). Its type sequence — e.g. maximum, maximum, regular, minimum, minimum — is summarised as a *long fate*: persistent, inverted (maximum → minimum), absorbed (extremum → saddle), flattened, or saddle → extremum.
+
+</details>
+
+<details>
+<summary><span style="font-size:21px;">Graph generation</span></summary>
+When the geometry of the mesh is too simple, for example similar to a sphere or  to a star shaped form, Reeb graphs capture this simplicity on the struture of the graph, this can provide a oversiplification on the analysis that not provide to much information, to extract a better geometrical representation for this cases we can build the graph generated by the critical points and the center of mass of the surface providing a rich structure representation to analyze under the same analysis provided for the reeb graphs.
+
+This graphs can be visualized running:
+
+```python
+from PynamicMesh.utils.visualizers import  visualize_graphs
+
+print('Mscomplex Graph visualizations...')
+visualize_graphs(mesh_path, ms_graph_path, graph='mscomplex')
+```
+
+
+<img src="./assets/cell_RG.gif" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
+
+<img src="./assets/MSCGraph.gif" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
+
+
+
+</details>
+</details>
+
+<details>
+<summary><span style="font-size:23px;">Parameter Election</span></summary>
+
+All Morse–Smale parameters are given to `run_pipeline` (or in the yaml).
+
+```python
+from PynamicMesh.core.pipelines import run_pipeline
+
+run_pipeline(
+    path_str=base_mesh_path,
+    compute_mscomplex=True,
+    ms_scalar='dist_centroid',
+    ms_persistence=0.08,
+    ms_min_region_area=0.0,
+    mscomplex_graph=True,
+    ms_graph_type='star+adjacency',
+    ms_track_regions=True,
+    ms_graph_metrics='all',
+    ms_tracker_params={
+     'iou_threshold': 0.25,          
+     'dominance': 0.5,               
+     'fate_radius': 0.04,            
+     'growth_tolerance': 0.002,      
+     'ghost_horizon': 6,             
+                       },  
+)
+```
+
+<details>
+<summary><span style="font-size:21px;">Pipeline parameters</span></summary>
+
+Compute the Morse–Smale complex, the protrusion segmentation and the critical-point statistics of every mesh:
+```python
+compute_mscomplex (bool) : False
+```
+
+Scalar field of the complex; any method of `get_scalar_field` (see <b>Reeb graph</b> parameters). `None` uses the Reeb field of the same frame (reused, not recomputed). For protrusions the distance to the centre of mass is the natural choice — a peak of `dist_centroid` is literally the farthest point of a protrusion; `mass_center_geodesic` is its along-the-surface counterpart. Curvature fields segment by local shape instead (peaks of `mean_curvature` are sharp tips); `heat_diffusion` / `harmonic` fields give smooth, coarse territories:
+```python
+ms_scalar (str|None) : None | 'dist_centroid' | 'mass_center_geodesic' | 'geodesic' | 'mean_curvature' | ...
+```
+
+Persistence threshold as a fraction of the field range. Bumps lower than this fraction are merged into their neighbours. Practical guidance: start around $0.05$–$0.10$; if the segmentation still shows many tiny patches, raise it; if two protrusions that are visibly separate are merged, lower it. The raw and simplified counts in `critical_points.csv` show how many critical points the threshold removed. $0$ keeps every critical point of the mesh:
+```python
+ms_persistence (float) : 0.05
+```
+
+Optional size-based cleaning: regions covering less than this fraction of the surface are merged into the neighbour with the longest shared boundary (useful when small but tall spikes must not count as protrusions):
+```python
+ms_min_region_area (float) : 0.0
+```
+
+Build the critical-point graph of every frame (nodes: critical points with `f_value`, `type`, `persistence`; a `center` node at the centre of mass) and run the Reeb-graph analyses on these graphs. With `'star'` every critical point is connected to the centre only — the degree-based metrics are then trivial; `'star+adjacency'` also connects the maxima of neighbouring regions (edge weight = length of their shared boundary), so the graph encodes the arrangement of the protrusions:
+```python
+mscomplex_graph (bool) : False
+ms_graph_type (str) : 'star' | 'star+adjacency'
+ms_graph_metrics (str|list) : 'all'
+```
+
+Track regions and critical points through the functional maps (requires `matrix_tranformation=True`; silently skipped otherwise):
+```python
+ms_track_regions (bool) : True
+```
+
+Advanced settings of the tracker:
+```python
+ms_tracker_params (dict)
+```
+
+<details>
+<summary><span style="font-size:19px;">ms_tracker_params keys</span></summary>
+
+Minimum area-weighted IoU for two regions of consecutive frames to be considered the same protrusion. Lower it for fast-moving or strongly deforming cells (regions overlap less), raise it for slowly evolving sequences:
+```python
+iou_threshold (float) : 0.25
+```
+
+Fraction of a region's area that must flow into (or come from) a single counterpart for a split or merge relation. Higher values make splits/merges rarer and births/deaths more frequent:
+```python
+dominance (float) : 0.5
+```
+
+Search radius for the nearest critical point when deciding the fate of an image point, as a fraction of $\sqrt{\text{surface area}}$ (with the default, about 4% of the cell size). Only used when the region- and value-based criteria do not decide:
+```python
+fate_radius (float) : 0.04
+```
+
+Normal displacements smaller than this fraction of $\sqrt{\text{area}}$ are reported as 'stable' rather than growing/retracting (absorbs mesh noise):
+```python
+growth_tolerance (float) : 0.002
+```
+
+Number of frames a critical point that has become regular keeps being followed, so that slow inversions (peak → flat → pit) are detected:
+```python
+ghost_horizon (int) : 6
+```
+</details>
+</details>
+
+<details>
+<summary><span style="font-size:21px;">Viewer</span></summary>
+
+You can visualize the segmentation and critical point detection running:
+
+```python
+from PynamicMesh.utils.visualizers import visualize_ms_complex
+
+visualize_ms_complex(mesh_path, ms_path)
+```
+
+<img src="./assets/cell_prosseg.gif" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
+
+</details>
+</details>
+
+<details>
+<summary><span style="font-size:23px;">Results and their interpretation</span></summary>
+
+Folder layout of `Results/<scene>/MSComplexAnalysis/`:
+
+* `MS_Complex/` — per frame: `MS_T####.pkl` (the complete complex), `Scalar_T####.npy` (the field), `Labels_T####.npy` (region of every vertex, identified by the vertex index of its maximum);
+* `critical_points.csv`, `critical_points_detail.csv`, `plots/critical_points_evolution.png`;
+* `MS_Graphs/` and `Graph_analysis/` — the critical-point graphs and the Reeb-graph analyses run on them (`time_analysis.csv`, `MS_Graphs_pairwise_graph_similarity.csv`, plots), documented in the <b>Reeb graph</b> and <b>Graph similarity</b> sections;
+* `Region_tracking/` — the dynamics: `region_lineage.csv`, `region_tracks.csv`, `critical_point_fates.csv`, `critical_point_trajectories.csv`, `tracking_summary.csv`, `fate_transition_counts.csv`, `long_fate_counts.csv`, `fate_meanings.json`, and the per-transition `mapped_T####_T####.npz` used by the viewer;
+* `plots/` — `region_events_evolution.png`, `fate_transition_matrix.png`, `protrusion_lineage.png`, `critical_point_trajectories.png`.
+
+<details>
+<summary><span style="font-size:21px;">Critical points per frame</span></summary>
+
+`critical_points.csv` has one row per mesh. `n_max`, `n_min`, `n_saddle` are the simplified counts — for a `dist_centroid` field, `n_max` is the **number of protrusions** and `n_regions` equals it; `n_min` counts the pits (concave areas between protrusions); `euler_simplified` must be $2$ on a closed cell (a different value indicates holes or a non-manifold mesh, see the `topology` metrics of the basic geometry). The `*_raw` columns are the counts before simplification: their distance to the simplified ones measures how much of the surface detail is noise at the chosen persistence. `max_persistence_rel_mean` is the mean height of the protrusions relative to the field range: a rising value means the cell is becoming more protrusive, a falling one that it is rounding up. `n_ms_cells` grows when the surface develops more pits between the protrusions (a more corrugated surface). `critical_points_detail.csv` lists every critical point with its position, value, persistence and region area; `plots/critical_points_evolution.png` draws the three panels (simplified counts, raw counts with the Euler check, segmentation size and mean persistence).
+
+<img src="./assets/critical_points_evolution.png" style="width: 25%; height: 25%; display: block; margin: 10px auto;"/>
+
+</details>
+
+<details>
+<summary><span style="font-size:21px;">Lineage of the protrusions</span></summary>
+
+`region_lineage.csv` has one row per relation between a region of frame $t$ and a region of frame $t+1$, with the `event`:
+
+* **continue** — the same protrusion (paired by IoU); `IoU` close to $1$ means it hardly moved or changed shape, `area_change_rel` its relative growth of territory, `persistence_prev/curr` its height before and after;
+* **split** — one territory became two: a protrusion that branches, or a new protrusion emerging on the flank of an existing one (the child gets a new `curr_track_id`);
+* **merge** — a territory was absorbed by a neighbour: the protrusion flattened and its surface was taken over by the neighbouring one (`overlap_fraction_prev` tells which share went where);
+* **birth** — a region without a predecessor: a protrusion nucleated in a formerly flat area;
+* **death** — a region whose surface has no significant successor.
+
+`region_tracks.csv` summarises each `track_id` (first and last frame, mean area, mean IoU, number of splits and merges, mean normal growth, persistence at start and end), so the life of every protrusion can be read in one line. `tracking_summary.csv` counts the events per transition together with the mean IoU of the matched regions, the soft-transport confidence and the hard/soft agreement (low values flag transitions where the functional map itself is unreliable — check the diagonal analysis of that pair). `plots/region_events_evolution.png` plots the event counts, the fates of the extrema and the growth statistics over time; `plots/protrusion_lineage.png` is a timeline with one line per track (marker size = territory area, colour = normal growth of its peak, stars = births, crosses = deaths, oblique links = splits/merges).
+
+<table>
+  <!-- ROW 1 -->
+  <tr>
+    <td align="center">
+      <img src="./assets/region_events_evolution.png" width="50%" height="50%" /><br />
+    </td>
+    <td align="center">
+      <img src="./assets/protrusion_lineage.png" width="40%" height="40%" /><br />
+    </td>
+  </tr>
+</table>
+
+
+</details>
+
+<details>
+<summary><span style="font-size:21px;">Fates of the critical points and their meaning</span></summary>
+
+`critical_point_fates.csv` has one row per critical point of frame $t$: its type, the type found at its image in frame $t+1$ (`type_next`), the geometric measures and a plain-language `meaning`. `fate_transition_counts.csv` and `plots/fate_transition_matrix.png` aggregate them over the sequence. The interpretation, for a field that increases toward the outside such as `dist_centroid`:
+
+| type at $t$ | type at $t+1$ | meaning |
+| --- | --- | --- |
+| maximum | maximum | the protrusion persists; `growth` says whether its tip moved outward (**growing**), inward (**retracting**) or stayed (**stable**) |
+| maximum | saddle | the protrusion was **absorbed laterally**: it no longer stands on its own, its former tip is now the pass toward a taller neighbouring protrusion (the two territories merged) |
+| maximum | minimum | the protrusion **inverted**: the tip was pushed inward and became a pit — a local contraction / invagination |
+| maximum | regular | the protrusion **flattened out** without becoming anything else |
+| minimum | minimum | the indentation persists (`normal_displacement` tells whether it deepens or relaxes) |
+| minimum | saddle | the pit **opened sideways**: it became the pass between two neighbouring pits or protrusions |
+| minimum | maximum | the indentation **inverted** into a bulge — a new protrusion pushed out from a formerly concave area |
+| minimum | regular | the indentation was **filled** |
+| saddle | saddle | the ridge/pass between two protrusions persists |
+| saddle | maximum | a **ridge rose** into a protrusion of its own — the signature of a protrusion splitting in two |
+| saddle | minimum | the pass **sank** into a pit between the two protrusions it separated |
+| saddle | regular | the pass smoothed out because the two regions it separated merged |
+| any | lost | no correspondence could be found through the maps (usually a poor functional map for that pair) |
+
+About the saddles: a maximum turning into a saddle is not a contraction. It is a **loss of independence** — the protrusion still bulges but has become part of a larger neighbour, its former tip being the lowest point of the ridge that joins them. Conversely saddle → maximum is the birth of independence: a bulge on a ridge becomes a protrusion with its own territory, which is exactly a **split** in the lineage. Reading the saddle transitions together with the split/merge events therefore separates protrusions that *retract* (max → regular / minimum, negative normal displacement) from protrusions that *coalesce* (max → saddle, merge) or *branch* (saddle → max, split).
+
+Quantities attached to every fate row: `normal_displacement` (image displacement along the outward normal, in units of $\sqrt{\text{area}}$; the growth signal), `tangential_displacement` (sliding along the surface), `delta_persistence` (change of protrusion height), `delta_f_rel` and `delta_rank` (change of the field value in absolute and rank terms — rank is comparable between frames even when the field's scale drifts), `same_region` (whether the image still lies in its own matched territory), `image_rings` (how far the correspondence had to search; $0$ is an exact match).
+
+<img src="./assets/fate_transition_matrix.png" style="width: 25%; height: 25%; display: block; margin: 10px auto;"/>
+
+</details>
+
+<details>
+<summary><span style="font-size:21px;">Multi-frame trajectories</span></summary>
+
+`critical_point_trajectories.csv` follows each critical point across the whole sequence: `type_sequence` (its type frame after frame, e.g. `maximum,maximum,regular,minimum,minimum`), `frames`, `vertices` (the critical vertex it is attached to) and `material_vertices` (the material point of its origin), `f_sequence`, `first_change_frame`, `cumulative_normal_disp` and the `long_fate` summary: **persistent** (or persistent (intermittent) when it briefly lost its type), **inverted (maximum → minimum)** / **(minimum → maximum)**, **absorbed (maximum → saddle)**, **flattened**, **saddle → extremum**. `long_fate_counts.csv` tallies them per original type and `plots/critical_point_trajectories.png` shows the type timeline as a coloured band per critical point (red maximum, green saddle, blue minimum, grey regular). This is the view to look at for slow processes: a protrusion that takes three frames to be pushed in appears per transition as "maximum → regular" and then nothing, but as a trajectory it is one inversion with a strongly negative cumulative normal displacement.
+
+<img src="./assets/critical_point_trajectories.png" style="width: 25%; height: 25%; display: block; margin: 10px auto;"/>
+</details>
+
+<details>
+<summary><span style="font-size:21px;">Reading the whole picture</span></summary>
+
+A cell that is spreading protrusions shows rising `n_max` and `max_persistence_rel_mean`, births and splits in the lineage, positive `mean_normal_growth` and mostly maximum → maximum (growing) fates. A cell that rounds up shows the opposite: falling counts and persistence, merges and deaths, negative growth, maximum → saddle / regular fates. Localised contractile events stand out as maximum → minimum fates and inverted trajectories at specific tracks, whose position (`x, y, z` in `critical_points_detail.csv`, colour in the viewer) tells where on the cell they happened. Because the segmentation is tied to a scalar field, the same machinery run with a curvature field reports tips and folds instead of protrusions, and with a heat or harmonic field reports the coarse lobes of the shape.
+
+</details>
+</details>
+</details>
+
+
+
 <details>
 <summary><strong><span style="font-size:25px;">Virtual Lab (Active Surfaces Simulations)</span></strong></summary>
+
+Having a physical property $P_i(S)$ over the surface (mesh), like pressure, elasticity, friction, etc. We can generate a model based on dfferential equations that describe the behaivour of the changes of this properties $\displaystyle F\left(\frac{\partial S}{\partial P_1(S)},...,\frac{\partial S}{\partial P_n(S)}\right)$, given some initial conditions $P_i(S)=v_i$ thats is, some vector of initial values for the model $\vec{v}={v_1,...,v_n}$ then the model can run an approxomimated simulation of the evolution of the system on time.
+
+<img src="./assets/AST_ex.gif" style="max-width: 100%; height: auto; display: block; margin: 10px auto;"/>
 
 The Virtual Lab turns a real cell mesh into a **mechano-chemical simulation**: the surface is treated as an *active surface* (the actomyosin cortex) whose tension, bending moments and cortical flows are set by a regulator field (active myosin) that lives on the surface, is transported by the flow it creates and reacts to the mechanics it produces. On top of the physics, the module provides the infrastructure of a laboratory: experiments defined as reusable protocols, perturbation assays (optogenetics, laser ablation, drug wash-in), parameter sweeps, metrics, animations.
 
@@ -2256,19 +2595,14 @@ Would you like to go deep on the bases and fundaments of the project?
 <b>Books</b>
 
 [An Introduction to Manifolds](https://link.springer.com/book/10.1007/978-1-4419-7400-6) by Loring W. Tu
-
 [Introduction to Differential Geometry](https://link.springer.com/book/10.1007/978-3-662-64340-2) by Joel W. Robbin , Dietmar A. Salamon
-
 [Theoretical and Computational Fluid Mechanics Existence, Blow-up, and Discrete Exterior Calculus Algorithms](https://www.routledge.com/Theoretical-and-Computational-Fluid-Mechanics-Existence-Blow-up-and-Discrete-Exterior-Calculus-Algorithms/Moschandreou-Afas-Nguyen/p/book/9781032589251) By Terry E. Moschandreou, Keith Afas, Khoa Nguyen
-
 [The Dynamics of Biological Systems](https://link.springer.com/book/10.1007/978-3-030-22583-4)  By Arianna Bianchi, Thomas Hillen, Mark A. Lewis, Yingfei Yi
 
 <b>Papers</b>
 
 [Mechanics of active surfaces](https://journals.aps.org/pre/abstract/10.1103/PhysRevE.96.032404) By Salbreux Guillaume, Jülicher  Frank
-
 [Functional maps: a flexible representation of maps between shapes](https://dl.acm.org/doi/10.1145/2185520.2185526) By Ovsjanikov, Maks and Ben-Chen, Mirela and Solomon, Justin and Butscher, Adrian and Guibas, Leonidas
-
 [Reeb graphs for shape analysis and applications](https://www.sciencedirect.com/science/article/pii/S0304397507007396) By S. Biasotti, D. Giorgi, M. Spagnuolo, B. Falcidieno
 
 </details>
