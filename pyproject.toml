@@ -32,7 +32,8 @@ dependencies = [
     "tifffile",
     "imageio",
     "pyacvd",
-    "h5py"
+    "h5py",
+    "scikit-image"
 ]
 
 
