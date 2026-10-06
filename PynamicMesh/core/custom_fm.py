@@ -352,8 +352,8 @@ def p2p_from_FM(FM_12, evects1, evects2):
     k2, k1 = FM_12.shape
     emb1 = evects1[:, :k1] @ FM_12.T
     emb2 = evects2[:, :k2]
-    _, p2p_21 = cKDTree(emb1).query(emb2, k=1)
-    return np.asarray(p2p_21, dtype=np.int64)
+    from PynamicMesh.core.accel import knn               # exact; GPU(s) when available, cKDTree otherwise
+    return knn(emb1, emb2, k=1)
 
 
 class CustomFunctionalMapping(FunctionalMapping):

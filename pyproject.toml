@@ -38,6 +38,7 @@ dependencies = [
 
 
 [project.optional-dependencies]
+# GPU dense algebra / nearest-neighbour searches (CuPy); choose the one matching your drivers
 gpu-12x = [
     "cupy-cuda12x",
 ]
@@ -46,6 +47,19 @@ gpu-13x = [
 ]
 rocm-7-0 = [
     "cupy-rocm-7-0",
+]
+# fast spherical harmonic transforms on the GPU (high-degree SPHARM, spherical spectra);
+# without it the same transforms run with NumPy
+spectral = [
+    "torch-harmonics",
+]
+# persistent homology of the shape trajectory (Dynamic Analysis); skipped with a message otherwise
+topology = [
+    "ripser",
+]
+# every optional analysis package (combine with one GPU extra, e.g. ".[gpu-12x,all]")
+all = [
+    "PynamicMesh[spectral,topology]",
 ]
 
 [project.urls]

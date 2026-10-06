@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 import seaborn as sns
 from scipy.sparse import coo_matrix, diags
 from PynamicMesh.utils.tools import mesh_mat2object
+from PynamicMesh.utils.plot_style import install as _install_plot_style; _install_plot_style()  # readable plots
 try:
     from PynamicMesh.utils.tools import load_aligned_mesh
 except ImportError:                       # older tools module
@@ -18,11 +19,13 @@ try:
     import cupy as xp
     import cupyx as xxp
     GPU_AVAILABLE = True
-    print("[INFO] CuPy detected. Utilizing GPU for Physics and metric computations.")
+    if __import__("multiprocessing").current_process().name == "MainProcess":            # worker processes import this module again: say it once
+        print("[INFO] CuPy detected. Utilizing GPU for Physics and metric computations.")
 except ImportError:
     xp = np
     GPU_AVAILABLE = False
-    print("[INFO] CuPy not found. Defaulting to CPU (NumPy).")
+    if __import__("multiprocessing").current_process().name == "MainProcess":            # worker processes import this module again: say it once
+        print("[INFO] CuPy not found. Defaulting to CPU (NumPy).")
 
 
 def to_gpu(arr):
@@ -525,8 +528,12 @@ def plot_global_physical_metrics(csv_path, dpi=150, single_file=True):
     if single_file:
         print("\nGenerating visual reports for the global physical metrics...")
 
-    t = df['Time_Step'] if 'Time_Step' in df else np.arange(1, len(df) + 1)
-    xlabel = r"Time Step (Transition $T_{i-1} \to T_i$)"
+    if 'Time' in df:                                       # acquisition times known (frame_times)
+        t = df['Time']
+        xlabel = f"time ({df['Time_Unit'].iloc[0] if 'Time_Unit' in df else 's'}) at the end of the transition"
+    else:
+        t = df['Time_Step'] if 'Time_Step' in df else np.arange(1, len(df) + 1)
+        xlabel = r"Time Step (Transition $T_{i-1} \to T_i$)"
 
     def has(col):
         return col in df.columns and not df[col].isna().all()
@@ -622,11 +629,17 @@ def _find_p2p_file(matrix_folder, i):
     return None
 
 
-def computing_fields(mesh_folder_path, matrix_folder_path, output_folder_path, single_file=True, dt=1.0, loader=None, plot=True):
+def computing_fields(mesh_folder_path, matrix_folder_path, output_folder_path, single_file=True, dt=1.0, loader=None, plot=True,
+                     times=None):
     """
     Computes all physics-based deformation fields step by step and caches them as .npz files,
     plus a CSV with integrated (global) quantities per transition (global_physical_metrics.csv)
     and, if `plot` is True, its time-series report in the 'plots' subfolder.
+
+    times: acquisition times of the frames (FrameTimes or array, see dyn_common.resolve_frame_times). When given,
+    every transition uses its own interval (irregular time-lapses are handled exactly): velocity = displacement / dt_i,
+    acceleration = (v_i - v_(i-1)) / ((dt_i + dt_(i-1)) / 2), and the csv gets Time / Dt and the rates of area and
+    volume change. Without times the uniform `dt` is used as before (the csv is unchanged).
 
     Meshes are loaded with the same loader used for the functional maps (aligned meshes), so the
     displacement field does not include the rigid alignment transform.
@@ -656,6 +669,14 @@ def computing_fields(mesh_folder_path, matrix_folder_path, output_folder_path, s
 
     prev_disp = None
     global_rows = []
+    t_arr = None
+    if times is not None:
+        t_arr = np.asarray(getattr(times, "t", times), dtype=np.float64)
+        if t_arr.size != len(obj_files):
+            print(f"[Warning] {t_arr.size} frame times for {len(obj_files)} meshes: the uniform dt is used.")
+            t_arr = None
+    unit = getattr(times, "unit", "s") if t_arr is not None else None
+    dt_prev = None
 
     for i in tqdm(range(1, len(obj_files)), desc='Processing structural metrics', leave=single_file):
         meshn = loader(obj_files[i])
@@ -671,7 +692,8 @@ def computing_fields(mesh_folder_path, matrix_folder_path, output_folder_path, s
             return False
 
         tracking_colors = tracking_colors[p2p_zo]
-        v_mag, displacements = compute_displacement_velocity(v_prev, v_cur, p2p_zo, dt=dt)
+        dt_i = float(t_arr[i] - t_arr[i - 1]) if t_arr is not None else dt
+        v_mag, displacements = compute_displacement_velocity(v_prev, v_cur, p2p_zo, dt=dt_i)
         strain = compute_finite_element_strain(v_prev, v_cur, f_cur, p2p_zo)
         area_strain = compute_area_strain(v_prev, v_cur, f_cur, p2p_zo)
         norm_mag, tang_mag = compute_flow_decomposition(v_cur, f_cur, displacements)
@@ -681,18 +703,27 @@ def computing_fields(mesh_folder_path, matrix_folder_path, output_folder_path, s
 
         # Acceleration: change of the displacement of the *same material point* between two transitions.
         if prev_disp is not None:
-            acceleration = np.linalg.norm(displacements - prev_disp[p2p_zo], axis=1) / dt ** 2
+            if t_arr is None:
+                acceleration = np.linalg.norm(displacements - prev_disp[p2p_zo], axis=1) / dt ** 2
+            else:                                          # irregular intervals: change of velocity over the mean interval
+                acceleration = (np.linalg.norm(displacements / dt_i - prev_disp[p2p_zo] / dt_prev, axis=1)
+                                / (0.5 * (dt_i + dt_prev)))
         else:
             acceleration = np.zeros(v_cur.shape[0])
-        prev_disp = displacements
+        prev_disp = displacements; dt_prev = dt_i
 
         np.savez(output_folder / f'frame_{i:04d}.npz', vertices=v_cur, faces=f_cur, colors=tracking_colors, aligned=True,
                  velocity=v_mag, strain=strain, area_strain=area_strain, normal_flow=norm_mag, tangential_flow=tang_mag,
                  acceleration=acceleration, normal_rotation=normal_rot, curvature_change=curv_change, **defo)
 
         row = {'Transition': f"T{i-1} -> T{i}", 'Time_Step': i}
+        if t_arr is not None:
+            row.update({'Time': float(t_arr[i]), 'Dt': dt_i, 'Time_Unit': unit})
         row.update(compute_global_metrics(v_prev, f_prev, v_cur, f_cur, p2p_zo, v_mag,
-                                          face_defo['elastic_energy_density'], area_r, valid, dt=dt))
+                                          face_defo['elastic_energy_density'], area_r, valid, dt=dt_i))
+        if t_arr is not None:                               # relative rates of change per time unit
+            row['area_change_rate'] = (row['area_ratio'] - 1.0) / dt_i
+            row['volume_change_rate'] = (row['volume_ratio'] - 1.0) / dt_i if np.isfinite(row['volume_ratio']) else np.nan
         row.update({
             'mean_abs_strain': float(np.mean(np.abs(strain))),
             'mean_abs_area_strain': float(np.mean(np.abs(area_strain))),
@@ -710,4 +741,4 @@ def computing_fields(mesh_folder_path, matrix_folder_path, output_folder_path, s
     pd.DataFrame(global_rows).to_csv(csv_path, index=False)
     if plot:
         plot_global_physical_metrics(csv_path, single_file=single_file)
-    return True
+    return True

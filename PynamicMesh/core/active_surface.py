@@ -2566,6 +2566,15 @@ class VirtualLaboratory:
                 if "time" in m.field_data:
                     arrays["time"] = np.asarray(m.field_data["time"])
                 np.savez_compressed(exp_dir / f"frame_{i:04d}_fields.npz", **arrays)
+        # acquisition (simulation) times next to the meshes: the analysis pipeline detects frame_times.csv in a
+        # scene folder and then uses the real time between the frames (velocities, rates, lifetimes, GIF timing)
+        times = [float(np.asarray(m.field_data["time"]).ravel()[0]) if "time" in m.field_data else None for m in traj]
+        if traj and all(t is not None for t in times):
+            fmt0 = self.save_formats[0] if self.save_formats else "obj"
+            with open(exp_dir / "frame_times.csv", "w", encoding="utf-8") as fh:
+                fh.write("frame,file,time,unit\n")
+                for i, t in enumerate(times):
+                    fh.write(f"{i},frame_{i:04d}.{fmt0},{t:.10g},s\n")
 
     @staticmethod
     def load_trajectory(exp_dir: Union[str, Path], fmt: str = "obj") -> List[pv.PolyData]:

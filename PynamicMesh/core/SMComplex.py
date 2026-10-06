@@ -28,7 +28,12 @@ Outline
                                  (continue / split / merge / birth / death), fate of every
                                  critical point (max -> max / saddle / min / regular, ...),
                                  protrusion growth measured along the surface normal.
-* ``critical_points_report``, ``tracking_report``  csv + plots under MSComplexAnalysis/.
+* ``fuse_hull_protrusions``      protrusions missed by the scalar field are recovered from the minima
+                                 of the depth below the convex hull (Huang, Wu & Yan 2024, Comput. Biol.
+                                 Med. 173:108350): trough height β, merge distance α, caps = protrusion
+                                 shapes, nested protrusions kept separate, noise-adaptive β, temporal
+                                 hysteresis through the p2p map; protrusion cores (protrusion vs body).
+* ``critical_points_report``, ``tracking_report``, ``protrusion_report``  csv + plots under MSComplexAnalysis/.
 """
 import os
 import re
@@ -42,6 +47,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import networkx as nx
+from tqdm.auto import tqdm
 import pyvista as pv
 import matplotlib
 import matplotlib.pyplot as plt
@@ -49,6 +55,7 @@ import seaborn as sns
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.csgraph import dijkstra
 from scipy.optimize import linear_sum_assignment
+from PynamicMesh.utils.plot_style import install as _install_plot_style; _install_plot_style()  # readable plots
 
 from PynamicMesh.core.reeb_graph import (
     get_scalar_field, _as_faces, _area_weighted_center, _get_mesh_adjacency, to_cpu,
@@ -303,6 +310,11 @@ class MSComplex:
     persistence_threshold: float
     n_vertices: int
     meta: Dict = field(default_factory=dict)
+    # convex-hull protrusion fusion (None for complexes computed without it / older pickles)
+    hull_depth: Optional[np.ndarray] = None          # depth below the convex hull boundary (Huang et al. 2024)
+    core_label: Optional[np.ndarray] = None          # protrusion core (protrusion id = maximum vertex, -1 = cell body)
+    protrusions: Optional[pd.DataFrame] = None       # one row per protrusion: source ms / hull / ms+hull, heights, areas
+    hull_candidates: Optional[pd.DataFrame] = None   # every hull-depth minimum examined, with the rejection reason
 
     # -- convenience --------------------------------------------------------
     def counts(self) -> Dict[str, int]:
@@ -331,7 +343,7 @@ class MSComplex:
 
 
 def compute_ms_complex(vertices, faces, scalar_field, persistence=0.05, frame=0,
-                       min_region_area=0.0) -> MSComplex:
+                       min_region_area=0.0, protrusion_params=None, prev_tips=None) -> MSComplex:
     """
     Morse–Smale complex of ``scalar_field`` on the mesh.
 
@@ -344,6 +356,10 @@ def compute_ms_complex(vertices, faces, scalar_field, persistence=0.05, frame=0,
     Saddles of the simplified complex are the merge vertices of the surviving persistence
     pairs (one per surviving max/min except the global ones), which satisfies Euler's relation
     #min - #saddle + #max = 2 on closed genus-0 surfaces.
+    protrusion_params : dict  convex-hull protrusion fusion (see PROTRUSION_DEFAULTS / configure_protrusion_detection);
+                          enabled by default: the maxima of the field are completed with the minima of the
+                          convex-hull depth (fuse_hull_protrusions). {'enabled': False} gives the plain complex.
+    prev_tips : array     vertices of this mesh where the previous frame's protrusions land (temporal hysteresis).
     """
     v = np.asarray(to_cpu(vertices), dtype=np.float64)
     F = _as_faces(faces)
@@ -433,7 +449,7 @@ def compute_ms_complex(vertices, faces, scalar_field, persistence=0.05, frame=0,
     E = _edges(F)
     boundary = E[lab_max[E[:, 0]] != lab_max[E[:, 1]]]
 
-    return MSComplex(frame=frame, scalar=f, label_max=lab_max, label_min=lab_min, cell=cell,
+    ms = MSComplex(frame=frame, scalar=f, label_max=lab_max, label_min=lab_min, cell=cell,
                      label_max_raw=lab_max_raw, label_min_raw=lab_min_raw, cp_type_raw=cp_raw,
                      cp_multiplicity=mult, critical=critical, maxima=maxima, minima=minima, saddles=saddles,
                      boundary_edges=boundary, vertex_area=A, center=_area_weighted_center(v, F),
@@ -442,7 +458,546 @@ def compute_ms_complex(vertices, faces, scalar_field, persistence=0.05, frame=0,
                            "n_min_raw": int((cp_raw == -1).sum()), "n_saddle_raw": int(mult.sum()),
                            "euler_raw": int((cp_raw == -1).sum() - mult.sum() + (cp_raw == 2).sum()),
                            "n_cells": int(cell.max() + 1)})
+    ms.meta["n_max_ms"] = int(len(maxima))
+    try:                                                   # topology of the surface: the expected Euler number
+        from PynamicMesh.core.reeb_graph import surface_topology
+        c_, chi_, b_, g_ = surface_topology(F)
+        ms.meta.update({"surface_euler": int(chi_), "surface_genus": int(g_), "boundary_loops": int(b_)})
+    except Exception:  # noqa: BLE001
+        pass
+    cfg = protrusion_config(protrusion_params)
+    if cfg["enabled"]:
+        try:
+            ms = fuse_hull_protrusions(ms, v, F, params=cfg, prev_tips=prev_tips)
+        except Exception as exc:  # noqa: BLE001
+            warnings.warn(f"convex-hull protrusion fusion failed on frame {frame} ({exc}); plain Morse–Smale result kept")
+    return ms
 
+
+
+#  Convex-hull depth protrusion detection (Huang, Wu & Yan 2024) and fusion with the MS complex
+
+PROTRUSION_DEFAULTS = {
+    "enabled": True,              # False -> plain Morse–Smale segmentation (previous behaviour)
+    "beta": 0.012,                # Huang's β: minimum trough height (hull-depth persistence) / equivalent radius
+    "noise_factor": 1.0,          # adaptive floor: β_eff = max(β, noise_factor · surface roughness / eq. radius)
+    "smooth_iters": 5,            # Taubin λ|μ iterations of the geometry used for the hull (noise spikes would span it)
+    "alpha": 0.08,                # Huang's α: minima closer than this geodesic distance (/ equivalent radius) are merged
+    "max_tip_depth": 0.25,        # a tip deeper than this below the hull (/ eq. radius) is a pit, not a protrusion
+    "min_aspect": 0.12,           # prominence / cap radius; rejects broad convex patches of the cell body
+    "max_cap_area": 0.30,         # a protrusion cap covers at most this fraction of the surface
+    "core_fraction": 0.25,        # protrusions without hull support: core = upper fraction of the relief of the scalar field
+    "temporal": True,             # hysteresis through the p2p map: weak candidates confirmed by the previous frame
+    "temporal_beta_factor": 0.5,  # ... accepted down to beta * factor and min_aspect * factor
+    "temporal_radius": 2.0,       # ... when a previous protrusion maps within radius * alpha of the tip
+    "prune_ms": False,            # drop MS maxima deep inside the hull without any hull support (off by default)
+    "prune_depth": 0.35,          # ... deeper than this (/ eq. radius)
+}
+_PROTRUSION_ENV = "PYNAMICMESH_PROTRUSION_PARAMS"
+_PROTRUSION_CONFIG: Dict = {}
+
+
+def configure_protrusion_detection(**params) -> Dict:
+    """
+    Sets the parameters of the convex-hull / Morse–Smale protrusion fusion used by compute_MS (call it before
+    run_pipeline). They are also exported to the environment so that worker processes see them.
+    Unknown keys raise. Returns the effective configuration.
+    """
+    unknown = set(params) - set(PROTRUSION_DEFAULTS)
+    if unknown:
+        raise ValueError(f"unknown protrusion parameters {sorted(unknown)}; valid: {sorted(PROTRUSION_DEFAULTS)}")
+    _PROTRUSION_CONFIG.update(params)
+    os.environ[_PROTRUSION_ENV] = json.dumps(_PROTRUSION_CONFIG)
+    return protrusion_config()
+
+
+def protrusion_config(overrides=None) -> Dict:
+    """Defaults <- configure_protrusion_detection / environment <- explicit overrides."""
+    cfg = dict(PROTRUSION_DEFAULTS)
+    env = os.environ.get(_PROTRUSION_ENV)
+    if env:
+        try:
+            cfg.update({k: v for k, v in json.loads(env).items() if k in cfg})
+        except (ValueError, TypeError):
+            pass
+    cfg.update(_PROTRUSION_CONFIG)
+    if overrides:
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+    return cfg
+
+
+def convex_hull_depth(vertices, chunk=1024):
+    """
+    Depth of every vertex below the boundary of the convex hull of the surface (Huang et al. 2024, §3.3):
+    for a point inside a convex polytope the distance to the boundary is the minimum distance to the facet
+    planes, depth_i = min_j -(n_j · p_i + d_j) (Qhull equations, n_j outward unit normals).
+    Returns depth (n,), the index of the nearest facet (n,), the projection of every vertex onto the hull
+    boundary p_i + depth_i n_j (Huang's projection ψ : M -> N) and the scipy ConvexHull.
+    """
+    from scipy.spatial import ConvexHull
+    v = np.asarray(to_cpu(vertices), dtype=np.float64)
+    try:
+        hull = ConvexHull(v)
+    except Exception:  # noqa: BLE001  (flat / degenerate input)
+        hull = ConvexHull(v, qhull_options="QJ")
+    eq = hull.equations
+    n = v.shape[0]
+    depth = np.empty(n); facet = np.empty(n, dtype=np.int64)
+    for s in range(0, n, chunk):
+        d = -(v[s:s + chunk] @ eq[:, :3].T + eq[:, 3][None, :])
+        k = np.argmin(d, axis=1)
+        facet[s:s + chunk] = k
+        depth[s:s + chunk] = d[np.arange(d.shape[0]), k]
+    depth = np.maximum(depth, 0.0)
+    proj = v + depth[:, None] * eq[facet, :3]
+    return depth, facet, proj, hull
+
+
+def surface_roughness(vertices, faces, adj=None):
+    """Noise level of the surface: robust spread (1.4826 MAD) of the normal component of the umbrella Laplacian
+    after removing its smooth (curvature) part by neighbour averaging. Same unit as the coordinates."""
+    v = np.asarray(to_cpu(vertices), dtype=np.float64)
+    adj = _neighbour_structure(v, faces) if adj is None else adj
+    Wu = adj.copy(); Wu.data = np.ones_like(Wu.data)
+    deg = np.maximum(np.diff(Wu.indptr), 1)
+    ln = np.einsum("ij,ij->i", v - (Wu @ v) / deg[:, None], _vertex_normals(v, faces))
+    r = ln - (Wu @ ln) / deg
+    return float(1.4826 * np.median(np.abs(r - np.median(r))))
+
+
+def taubin_smooth(vertices, adj, iters=5, lam=0.5, mu=-0.53):
+    """Taubin λ|μ smoothing (uniform weights): removes vertex noise without shrinking the surface."""
+    X = np.asarray(vertices, dtype=np.float64).copy()
+    if iters <= 0:
+        return X
+    Wu = adj.copy(); Wu.data = np.ones_like(Wu.data)
+    deg = np.maximum(np.diff(Wu.indptr), 1)[:, None]
+    for _ in range(int(iters)):
+        X = X + lam * ((Wu @ X) / deg - X)
+        X = X + mu * ((Wu @ X) / deg - X)
+    return X
+
+
+def _superlevel_component(adj, g, seed, level):
+    """Connected component of {g > level} containing seed (the 'mountain' of seed above its col)."""
+    from collections import deque
+    ip, ix = adj.indptr, adj.indices
+    seen = np.zeros(g.shape[0], dtype=bool); seen[seed] = True
+    q = deque([int(seed)]); out = [int(seed)]
+    while q:
+        u = q.popleft()
+        for w in ix[ip[u]:ip[u + 1]]:
+            if not seen[w] and g[w] > level:
+                seen[w] = True; q.append(int(w)); out.append(int(w))
+    return np.asarray(out, dtype=np.int64)
+
+
+def hull_protrusion_candidates(vertices, faces, depth, adj=None, A=None, params=None, prev_tips=None):
+    """
+    Protrusion candidates of the convex-hull depth (local minima of the depth, Huang et al. 2024 §3.4–3.5),
+    computed directly on the mesh: by Huang's Theorem 1 the critical points are invariant under the
+    diffeomorphism to the hull boundary, so the spherical projection (a chart for finite differences) is not
+    needed and the PL critical points + merge-tree persistence give the minima exactly.
+
+      g = -depth / s   (s = sqrt(area / 4π), equivalent radius)  -> tips are maxima of g
+      trough height (Huang's β) = persistence of the maximum of g; cap = mountain above its col
+      (connected component of {g > g(col)}), i.e. the protrusion shape of 'ExtractCellProtrusions'.
+
+    Accepted: height >= beta, tip depth <= max_tip_depth, aspect = height / cap radius >= min_aspect, cap area
+    <= max_cap_area; tips closer than alpha (geodesic) are merged into the higher one (Huang's α).
+    With prev_tips (vertices of this mesh where the protrusions of the previous frame land), candidates down to
+    beta * temporal_beta_factor are accepted if a previous tip lies within temporal_radius * alpha.
+    Returns (accepted list of dicts, DataFrame of every examined candidate with the reason of rejection).
+    """
+    p = protrusion_config(params)
+    v = np.asarray(to_cpu(vertices), dtype=np.float64); F = _as_faces(faces)
+    adj = _neighbour_structure(v, F) if adj is None else adj
+    A = _vertex_areas(v, F)[0] if A is None else A
+    s = float(np.sqrt(A.sum() / (4.0 * np.pi)))
+    g = -np.asarray(depth, dtype=np.float64) / s
+    pairs = persistence_pairs(adj, g, "max")
+    beta_low = p["beta"] * (p["temporal_beta_factor"] if (p["temporal"] and prev_tips is not None and len(prev_tips)) else 1.0)
+    killed_by: Dict[int, List[int]] = {}
+    for e, (sd, pers, k) in pairs.items():
+        if sd >= 0 and pers >= beta_low:               # significant merges only (noise peaks on a plateau ignored)
+            killed_by.setdefault(int(k), []).append(int(sd))
+    d_prev = None
+    if prev_tips is not None and len(prev_tips):
+        d_prev = dijkstra(adj, indices=np.asarray(prev_tips, dtype=np.int64), min_only=True,
+                          limit=p["temporal_radius"] * p["alpha"] * s)
+    rows, cand = [], []
+    for e, (sd, pers, k) in pairs.items():
+        if sd >= 0:
+            level = g[sd]
+        else:                                    # global maximum: its highest significant col
+            cols = killed_by.get(int(e), [])
+            level = max((g[c] for c in cols), default=float(g.min()))
+        height = float(g[e] - level)
+        if height < beta_low:
+            continue
+        cap = _superlevel_component(adj, g, e, level)
+        a_cap = float(A[cap].sum())
+        aspect = height / max(np.sqrt(a_cap / (np.pi * s * s)), 1e-12)
+        tip_depth = float(depth[e] / s)
+        # temporal hysteresis: a candidate on which a protrusion of the previous frame lands only has to pass
+        # the relaxed thresholds (both the trough height and the aspect, by temporal_beta_factor)
+        supported = d_prev is not None and bool(np.isfinite(d_prev[e]))
+        relax = p["temporal_beta_factor"] if (p["temporal"] and supported) else 1.0
+        temporal = bool(supported and (height < p["beta"] or aspect < p["min_aspect"]))
+        reason = ""
+        if tip_depth > p["max_tip_depth"]:
+            reason = "tip too deep (pit)"
+        elif height < p["beta"] * relax:
+            reason = "below beta" + ("" if supported else " (no temporal support)")
+        elif aspect < p["min_aspect"] * relax:
+            reason = "flat convex patch (aspect)"
+        elif a_cap > p["max_cap_area"] * A.sum():
+            reason = "cap too large"
+        row = {"vertex": int(e), "height_rel": height, "tip_depth_rel": tip_depth, "cap_area": a_cap,
+               "cap_area_rel": a_cap / A.sum(), "aspect": float(aspect), "col_vertex": int(sd),
+               "temporal": temporal, "accepted": reason == "", "reason": reason}
+        rows.append(row)
+        if not reason:
+            cand.append({**row, "cap": cap})
+    # Huang's α: merge tips closer than alpha (keep the higher trough); nested caps are distinct protrusions
+    cand.sort(key=lambda c: -c["height_rel"])
+    kept = []
+    for c in cand:
+        if kept:
+            dist = dijkstra(adj, indices=[k_["vertex"] for k_ in kept], min_only=True, limit=p["alpha"] * s)
+            if np.isfinite(dist[c["vertex"]]):
+                for r in rows:
+                    if r["vertex"] == c["vertex"]:
+                        r["accepted"], r["reason"] = False, "merged (alpha)"
+                continue
+        kept.append(c)
+    table = pd.DataFrame(rows, columns=["vertex", "height_rel", "tip_depth_rel", "cap_area", "cap_area_rel", "aspect",
+                                        "col_vertex", "temporal", "accepted", "reason"])
+    return kept, table
+
+
+def _fix_region_connectivity(label, keep_vertex, E, max_iter=10):
+    """Every label keeps only the component that contains its protrusion vertex; stray fragments are given to the
+    neighbouring label with which they share most edges (repeated until stable)."""
+    from scipy.sparse.csgraph import connected_components
+    n = label.shape[0]
+    for _ in range(max_iter):
+        same = label[E[:, 0]] == label[E[:, 1]]
+        Es = E[same]
+        G = coo_matrix((np.ones(len(Es)), (Es[:, 0], Es[:, 1])), shape=(n, n))
+        _, comp = connected_components(G, directed=False)
+        good = np.zeros(comp.max() + 1, dtype=bool)
+        for lab in np.unique(label):
+            kv = keep_vertex.get(int(lab), int(lab))
+            if 0 <= kv < n and label[kv] == lab:
+                good[comp[kv]] = True
+        stray = ~good[comp]
+        if not stray.any():
+            break
+        ce = E[comp[E[:, 0]] != comp[E[:, 1]]]
+        changed = False
+        for c in np.unique(comp[stray]):
+            sel = (comp[ce[:, 0]] == c) ^ (comp[ce[:, 1]] == c)
+            if not sel.any():
+                continue
+            other = np.where(comp[ce[sel, 0]] == c, ce[sel, 1], ce[sel, 0])
+            other = other[good[comp[other]]] if good[comp[other]].any() else other
+            vals, cnts = np.unique(label[other], return_counts=True)
+            label[comp == c] = vals[np.argmax(cnts)]
+            changed = True
+        if not changed:
+            break
+    return label
+
+
+def fuse_hull_protrusions(ms: "MSComplex", vertices, faces, params=None, prev_tips=None) -> "MSComplex":
+    """
+    Completes the Morse–Smale protrusion segmentation with the convex-hull depth detection.
+
+    1. hull candidates (see hull_protrusion_candidates) with their caps;
+    2. matching: every MS maximum confirms the innermost cap that contains it (else the nearest tip within α);
+       confirmed candidates are the same protrusion ('ms+hull');
+    3. the unconfirmed candidates are protrusions the scalar field missed ('hull'): their caps are carved out of
+       the MS regions (larger caps first, so nested protrusions are painted last and stay separate), stray
+       fragments are re-attached, and every new maximum gets the saddle of its col (pair_kind 'max', killer =
+       the region it was carved from), so #min - #saddle + #max is unchanged;
+    4. protrusion cores (protrusion vs cell body): the hull cap for hull-supported protrusions, the upper part
+       of the relief of the scalar field (core_fraction) for MS-only ones.
+    The regions (label_max / maxima / critical / boundary_edges / cell) keep their meaning, so the tracker,
+    graphs and viewers work unchanged; extra results: ms.hull_depth, ms.core_label, ms.protrusions,
+    ms.hull_candidates.
+    """
+    p = protrusion_config(params)
+    v = np.asarray(to_cpu(vertices), dtype=np.float64); F = _as_faces(faces)
+    n = v.shape[0]
+    adj = _neighbour_structure(v, F)
+    A = ms.vertex_area
+    s = float(np.sqrt(A.sum() / (4.0 * np.pi)))
+    # noise-robust hull: noise spikes of a marching-cubes surface would span the hull and create spurious
+    # minima, so the depth is measured on a Taubin-smoothed copy (same connectivity / vertex ids) and the
+    # trough height threshold is raised to the noise level of the original surface
+    noise_rel = surface_roughness(v, F, adj) / s
+    beta_eff = max(float(p["beta"]), float(p["noise_factor"]) * noise_rel)
+    p_eff = {**p, "beta": beta_eff}
+    v_h = taubin_smooth(v, adj, p["smooth_iters"])
+    depth, facet, proj, hull = convex_hull_depth(v_h)
+    cands, table = hull_protrusion_candidates(v_h, F, depth, adj=adj, A=A, params=p_eff, prev_tips=prev_tips)
+    f = ms.scalar
+    frange = ms.meta.get("field_range", 1.0)
+    label = ms.label_max.copy()
+    ms_max = [int(m) for m in ms.maxima]
+    E = _edges(F)
+
+    # optional pruning of deep MS maxima without any hull support
+    pruned = []
+    if p["prune_ms"] and cands:
+        in_cap = np.zeros(n, dtype=bool)
+        for c in cands:
+            in_cap[c["cap"]] = True
+        for m in ms_max:
+            if depth[m] / s > p["prune_depth"] and not in_cap[m] and len(ms_max) - len(pruned) > 1:
+                pruned.append(m)
+        if pruned:
+            label[np.isin(label, pruned)] = -1
+            ms_max = [m for m in ms_max if m not in pruned]
+            for _ in range(n):                                    # flood the pruned regions from their neighbours
+                bad = label < 0
+                if not bad.any():
+                    break
+                e_ = E[(label[E[:, 0]] < 0) ^ (label[E[:, 1]] < 0)]
+                src = np.where(label[e_[:, 0]] < 0, e_[:, 1], e_[:, 0]); dst = np.where(label[e_[:, 0]] < 0, e_[:, 0], e_[:, 1])
+                label[dst] = label[src]
+
+    # 2. matching MS maxima <-> hull candidates
+    cap_sets = [set(c["cap"].tolist()) for c in cands]
+    owner = {}                                   # candidate index -> list of MS maxima
+    ms_to_cand = {}
+    tips = np.array([c["vertex"] for c in cands], dtype=np.int64)
+    for m in ms_max:
+        inside = [k for k, cs in enumerate(cap_sets) if m in cs]
+        if inside:
+            k = min(inside, key=lambda k_: cands[k_]["cap_area"])
+        elif tips.size:
+            dist = dijkstra(adj, indices=m, limit=p["alpha"] * s)
+            k = int(np.argmin(dist[tips])) if np.isfinite(dist[tips]).any() else -1
+        else:
+            k = -1
+        if k >= 0:
+            owner.setdefault(k, []).append(m); ms_to_cand[m] = k
+
+    # 3. carve the caps (confirmed caps are painted with their MS maximum, new caps with their own tip)
+    order = sorted(range(len(cands)), key=lambda k_: -cands[k_]["cap_area"])
+    host_of = {}
+    for k in order:
+        c = cands[k]
+        if k in owner:
+            if len(owner[k]) == 1:                                   # one MS maximum: the cap is its protrusion
+                label[c["cap"]] = owner[k][0]
+            # several MS maxima on one hull cap: keep their Morse–Smale partition inside the cap
+        else:
+            vals, cnts = np.unique(label[c["cap"]], return_counts=True)
+            host_of[c["vertex"]] = int(vals[np.argmax(cnts)])
+            label[c["cap"]] = c["vertex"]
+    keep_vertex = {int(l): int(l) for l in np.unique(label)}
+    label = _fix_region_connectivity(label, keep_vertex, E)
+    added = [cands[k]["vertex"] for k in range(len(cands)) if k not in owner and label[cands[k]["vertex"]] == cands[k]["vertex"]]
+
+    maxima = np.unique(label)
+    boundary = E[label[E[:, 0]] != label[E[:, 1]]]
+
+    # critical point table: MS rows (pruned maxima and their saddles removed) + new maxima and their cols
+    crit = ms.critical.copy()
+    gone = set(pruned) | (set(ms_max) - set(maxima.tolist()))          # safety: maxima whose region vanished
+    if gone:
+        crit = crit[~(((crit.type == "maximum") & crit.vertex.isin(gone)) |
+                      ((crit.type == "saddle") & (crit.pair_kind == "max") & crit.pair_extremum.isin(gone)))]
+    g = -depth / s
+    new_rows = []
+    cand_of = {c["vertex"]: c for c in cands}
+    for c_v in added:
+        c = cand_of[c_v]
+        reg = label == c_v
+        pers_rel = float(c["height_rel"]); pers = pers_rel * frange
+        new_rows.append(dict(vertex=int(c_v), type="maximum", f=float(f[c_v]), persistence=pers, x=v[c_v, 0], y=v[c_v, 1],
+                             z=v[c_v, 2], region_area=float(A[reg].sum()), paired_saddle=-1, pair_extremum=-1,
+                             pair_killer=-1, pair_kind="", persistence_rel=pers_rel))
+        bnd = boundary[(label[boundary[:, 0]] == c_v) | (label[boundary[:, 1]] == c_v)]
+        if bnd.size:
+            # the saddle is the col of the protrusion: the pass where its mountain joins the neighbouring one
+            # (merge vertex of the depth persistence pair). It lies outside the region by construction; if the
+            # carving moved it, take the highest vertex just OUTSIDE the region (the inside boundary vertices are
+            # always higher and sit next to the tip: that gave saddles glued to their maximum)
+            outside = np.where(label[bnd[:, 0]] == c_v, bnd[:, 1], bnd[:, 0])
+            sv = int(c["col_vertex"])
+            if sv < 0 or label[sv] == c_v or sv not in set(outside.tolist()):
+                ring = set(outside.tolist())
+                sv = int(c["col_vertex"]) if (c["col_vertex"] >= 0 and label[c["col_vertex"]] != c_v
+                                               and any(w in ring for w in adj.indices[adj.indptr[c["col_vertex"]]:adj.indptr[c["col_vertex"] + 1]])) \
+                    else int(outside[np.argmax(g[outside])])
+            other = np.where(label[bnd[:, 0]] == c_v, label[bnd[:, 1]], label[bnd[:, 0]])
+            vals, cnts = np.unique(other, return_counts=True)
+            killer = host_of.get(c_v, int(vals[np.argmax(cnts)]))
+            killer = killer if killer in set(maxima.tolist()) else int(vals[np.argmax(cnts)])
+            new_rows[-1]["paired_saddle"] = sv
+            new_rows.append(dict(vertex=sv, type="saddle", f=float(f[sv]), persistence=pers, x=v[sv, 0], y=v[sv, 1],
+                                 z=v[sv, 2], region_area=np.nan, paired_saddle=-1, pair_extremum=int(c_v),
+                                 pair_killer=int(killer), pair_kind="max", persistence_rel=pers_rel))
+    if new_rows:
+        crit = pd.concat([crit, pd.DataFrame(new_rows)], ignore_index=True)
+    is_max = crit.type == "maximum"
+    crit.loc[is_max, "region_area"] = [float(A[label == vv].sum()) for vv in crit.loc[is_max, "vertex"]]
+    crit["source"] = "ms"
+    crit.loc[is_max & crit.vertex.isin(added), "source"] = "hull"
+    crit.loc[is_max & crit.vertex.isin([m for m in ms_max if m in ms_to_cand]), "source"] = "ms+hull"
+    crit.loc[(crit.type == "saddle") & crit.pair_extremum.isin(added), "source"] = "hull"
+    crit["hull_depth_rel"] = depth[crit.vertex.to_numpy(dtype=np.int64)] / s
+    crit = crit.reset_index(drop=True)
+
+    # 4. protrusion cores and table
+    core = np.full(n, -1, dtype=np.int64)
+    for k in order:                                             # caps (nested ones last)
+        c = cands[k]
+        if k in owner and len(owner[k]) > 1:                    # shared cap: each MS region keeps its part
+            core[c["cap"]] = label[c["cap"]]
+        else:
+            core[c["cap"]] = owner[k][0] if k in owner else c["vertex"]
+    core[core >= 0] = np.where(label[core >= 0] == core[core >= 0], core[core >= 0], -1)
+    prot_rows = []
+    for m in maxima:
+        m = int(m)
+        reg = label == m
+        k = ms_to_cand.get(m, None)
+        if k is None and m in cand_of:
+            k = next(i for i, c in enumerate(cands) if c["vertex"] == m)
+        source = "hull" if m in added else ("ms+hull" if m in ms_to_cand else "ms")
+        if not (core == m).any():                              # MS-only: upper part of the relief of the field
+            idx = np.where(reg)[0]
+            lvl = f[m] - p["core_fraction"] * (f[m] - f[idx].min())
+            comp = _superlevel_component(adj, np.where(reg, f, -np.inf), m, lvl)
+            core[comp] = m
+        creg = core == m
+        tip_h = int(np.where(creg)[0][np.argmin(depth[creg])]) if creg.any() else m
+        cand = cands[k] if k is not None else None
+        ms_row = ms.critical[(ms.critical.type == "maximum") & (ms.critical.vertex == m)]
+        ms_pers = float(ms_row.persistence_rel.iloc[0]) if len(ms_row) else np.nan
+        hull_h = float(cand["height_rel"]) if cand is not None else np.nan
+        sc_ms = 0.0 if not (ms_pers == ms_pers) else (1.0 if np.isinf(ms_pers) else
+                                                       min(1.0, ms_pers / max(2.0 * ms.persistence_threshold / frange, 1e-12)))
+        sc_h = min(1.0, hull_h / (2.0 * beta_eff)) if np.isfinite(hull_h) else 0.0
+        nrm = hull.equations[facet[tip_h], :3]
+        prot_rows.append({"protrusion_id": m, "source": source, "tip_vertex": m, "hull_tip_vertex": tip_h,
+                          "x": v[m, 0], "y": v[m, 1], "z": v[m, 2],
+                          "tip_hull_depth_rel": float(depth[tip_h] / s), "hull_height_rel": hull_h,
+                          "ms_persistence_rel": ms_pers, "temporal_support": bool(cand["temporal"]) if cand is not None else False,
+                          "region_area": float(A[reg].sum()), "region_area_rel": float(A[reg].sum() / A.sum()),
+                          "core_area": float(A[creg].sum()), "core_area_rel": float(A[creg].sum() / A.sum()),
+                          "core_height_rel": float((depth[creg].max() - depth[tip_h]) / s) if creg.any() else 0.0,
+                          "aspect": float(cand["aspect"]) if cand is not None else np.nan,
+                          "direction_x": nrm[0], "direction_y": nrm[1], "direction_z": nrm[2],
+                          "confidence": float(1.0 - (1.0 - sc_ms) * (1.0 - sc_h))})
+    protrusions = pd.DataFrame(prot_rows)
+
+    pair_key = label.astype(np.int64) * (n + 1) + ms.label_min.astype(np.int64)
+    _, cell = np.unique(pair_key, return_inverse=True)
+    saddles = np.array(sorted(set(crit.loc[crit.type == "saddle", "vertex"].astype(int).tolist())), dtype=np.int64)
+    ms.label_max, ms.maxima, ms.saddles, ms.critical, ms.boundary_edges = label, maxima, saddles, crit, boundary
+    ms.cell = cell
+    ms.hull_depth, ms.core_label, ms.protrusions = depth, core, protrusions
+    ms.hull_candidates = table
+    ms.meta.update({"protrusion_method": "ms+convex_hull", "protrusion_params": {k: p[k] for k in p},
+                    "n_cells": int(cell.max() + 1), "equivalent_radius": s, "n_hull_facets": int(len(hull.equations)),
+                    "n_protrusions_ms_only": int((protrusions.source == "ms").sum()),
+                    "n_protrusions_hull_only": int((protrusions.source == "hull").sum()),
+                    "n_protrusions_both": int((protrusions.source == "ms+hull").sum()),
+                    "n_ms_pruned": len(pruned), "noise_level_rel": noise_rel, "beta_effective": beta_eff})
+    return ms
+
+
+def _map_previous_tips(prev_ms, p2p, n_curr, prev_vertices=None, prev_faces=None):
+    """Vertices of the current mesh where the protrusion tips of the previous frame land through the p2p map
+    (p2p with n_curr entries = current -> previous, as the tracker's p2p_21; n_prev entries = previous -> current)."""
+    if prev_ms is None or p2p is None:
+        return None
+    p2p = np.asarray(to_cpu(p2p), dtype=np.int64).ravel()
+    tips = np.asarray(prev_ms.maxima, dtype=np.int64)
+    if p2p.shape[0] == n_curr:
+        vp = np.asarray(to_cpu(prev_vertices), float) if prev_vertices is not None else None
+        adj_prev = _neighbour_structure(vp, prev_faces) if vp is not None and prev_faces is not None else None
+        core_prev = getattr(prev_ms, "core_label", None)
+        region_prev = core_prev if core_prev is not None else prev_ms.label_max
+        out = []
+        for u in tips:
+            pre = np.where(p2p == u)[0]
+            if pre.size:
+                out.append(int(pre[0])); continue
+            # no exact pre-image (the p2p map is not injective): pre-images of the previous protrusion core,
+            # the one whose previous position is closest to the old tip
+            pre = np.where(region_prev[p2p] == u)[0]
+            if pre.size:
+                if vp is not None:
+                    pre = pre[[int(np.argmin(np.linalg.norm(vp[p2p[pre]] - vp[u], axis=1)))]]
+                out.append(int(pre[0])); continue
+            if adj_prev is not None:
+                j, _ = RegionTracker._image_vertex(int(u), p2p, None, adj_prev)
+                if j >= 0:
+                    out.append(j)
+        return np.asarray(out, dtype=np.int64)
+    if p2p.shape[0] == prev_ms.n_vertices:
+        return p2p[tips]
+    return None
+
+
+def protrusion_report(target_folder, single_file=True):
+    """Protrusions/protrusions_detail.csv (every protrusion of every frame: source, hull depth, heights, areas,
+    confidence), protrusions_summary.csv (per frame counts by source), hull_candidates.csv and the plot."""
+    d = ms_folders(target_folder)
+    out = d["root"] / "Protrusions"; os.makedirs(out, exist_ok=True)
+    seq = load_ms_sequence(target_folder)
+    det, cands, summ = [], [], []
+    for ms in tqdm(seq, desc="Protrusions report", leave=False):
+        pr = getattr(ms, "protrusions", None)
+        if pr is None or not len(pr):
+            continue
+        det.append(pr.assign(Time_Step=ms.frame))
+        hc = getattr(ms, "hull_candidates", None)
+        if hc is not None and len(hc):
+            cands.append(hc.assign(Time_Step=ms.frame))
+        summ.append({"Time_Step": ms.frame, "n_protrusions": len(pr), "n_ms_only": int((pr.source == "ms").sum()),
+                     "n_hull_only": int((pr.source == "hull").sum()), "n_both": int((pr.source == "ms+hull").sum()),
+                     "n_temporal": int(pr.temporal_support.sum()), "mean_confidence": float(pr.confidence.mean()),
+                     "mean_core_area_rel": float(pr.core_area_rel.mean()), "total_core_area_rel": float(pr.core_area_rel.sum()),
+                     "mean_core_height_rel": float(pr.core_height_rel.mean()), "n_ms_pruned": ms.meta.get("n_ms_pruned", 0)})
+    if not summ:
+        if single_file:
+            print("No convex-hull protrusion results (fusion disabled?).")
+        return None
+    pd.concat(det, ignore_index=True).to_csv(out / "protrusions_detail.csv", index=False)
+    if cands:
+        pd.concat(cands, ignore_index=True).to_csv(out / "hull_candidates.csv", index=False)
+    df = pd.DataFrame(summ)
+    from PynamicMesh.core.dyn_common import add_time_columns
+    df = add_time_columns(df, target_folder, frame_col="Time_Step")
+    df.to_csv(out / "protrusions_summary.csv", index=False)
+    X_ = df.Time if "Time" in df else df.Time_Step
+    sns.set_theme(style="whitegrid")
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    ax = axes[0]
+    ax.stackplot(X_, df.n_both, df.n_ms_only, df.n_hull_only,
+                 labels=["MS + hull (both)", "MS only (scalar field)", "hull only (recovered)"],
+                 colors=["tab:purple", CP_COLORS["maximum"], "tab:cyan"], alpha=0.8)
+    ax.plot(X_, df.n_temporal, color="k", linestyle=":", marker=".", label="accepted by temporal support")
+    ax.set_ylabel("protrusions"); ax.legend(loc="upper left", fontsize=8)
+    ax.set_title("Protrusion detection: Morse–Smale maxima fused with convex-hull depth minima", fontweight="bold")
+    ax = axes[1]
+    ax.plot(X_, df.total_core_area_rel, marker="o", color="tab:green", label="protrusion cores / surface area")
+    ax2 = ax.twinx(); ax2.plot(X_, df.mean_core_height_rel, marker="^", color="tab:brown", label="mean core height / eq. radius")
+    ax.set_xlabel(f"time ({df.Time_Unit.iloc[0]})" if "Time" in df else "Time step"); ax.set_ylabel("area fraction"); ax2.set_ylabel("height")
+    h1, l1 = ax.get_legend_handles_labels(); h2, l2 = ax2.get_legend_handles_labels(); ax.legend(h1 + h2, l1 + l2, fontsize=8)
+    ax.set_title("Protrusion cores (protrusion vs cell body)", fontweight="bold")
+    fig.tight_layout(); fig.savefig(d["plots"] / "protrusion_detection_evolution.png", dpi=200); plt.close(fig)
+    if single_file:
+        print(f"Protrusion report saved to {out}")
+    return str(out / "protrusions_summary.csv")
 
 
 #  Star graph on the critical points
@@ -456,6 +1011,14 @@ def ms_star_graph(ms: MSComplex, vertices, faces, graph_type="star") -> nx.Graph
     which makes the graph metrics sensitive to the arrangement of the protrusions.
     Node keys are 'cp_<vertex>' / 'center' so that graph_time_analysis / graph_similarity
     (node_function_value reads 'f_value') work unchanged.
+    Detection origin (convex-hull protrusion fusion): every critical-point node carries
+      source        'ms' | 'hull' | 'ms+hull' (maxima; saddles 'ms' | 'hull'; minima 'ms')
+      origin        'hull' for the points added by the convex hull (tips and their cols), else 'ms'
+                    ('ms+hull' maxima are maxima of the scalar field confirmed by the hull -> 'ms')
+      origin_label  '<type>_<origin>' (e.g. 'maximum_hull', 'saddle_ms'), used by graph_sim's origin-separated
+                    comparison; 'label' stays the plain type, so the existing labelled metric is unchanged
+      pair_extremum saddles: the maximum whose persistence pair they close (-1 otherwise)
+    G.graph['has_hull_origin'] is True when at least one node comes from the hull.
     """
     v = np.asarray(to_cpu(vertices), dtype=np.float64)
     G = nx.Graph()
@@ -464,13 +1027,33 @@ def ms_star_graph(ms: MSComplex, vertices, faces, graph_type="star") -> nx.Graph
     G.add_node("center", pos=tuple(float(c) for c in center), f_value=float(np.average(f, weights=ms.vertex_area)),
                type="center", persistence=np.inf, vertex=-1, label="center", region_area=float(ms.vertex_area.sum()),
                bin=0, n_vertices=int(ms.n_vertices))
+    has_src = "source" in ms.critical.columns
+    n_hull = 0
     for _, r in ms.critical.iterrows():
         key = f"cp_{int(r.vertex)}"
+        src = str(r.source) if has_src and isinstance(r.source, str) else "ms"
+        origin = "hull" if src == "hull" else "ms"
+        n_hull += origin == "hull"
+        pe = int(r.pair_extremum) if (r.type == "saddle" and str(r.pair_kind) == "max") else -1
         G.add_node(key, pos=(float(r.x), float(r.y), float(r.z)), f_value=float(r.f), type=str(r.type),
                    persistence=float(r.persistence), vertex=int(r.vertex), label=str(r.type),
                    region_area=float(r.region_area) if np.isfinite(r.region_area) else 0.0,
-                   bin=int(CP_TYPES.index(r.type)), n_vertices=int((ms.label_max == r.vertex).sum()) if r.type == "maximum" else 1)
+                   bin=int(CP_TYPES.index(r.type)), n_vertices=int((ms.label_max == r.vertex).sum()) if r.type == "maximum" else 1,
+                   source=src, origin=origin, origin_label=f"{r.type}_{origin}", pair_extremum=pe)
         G.add_edge("center", key, weight=float(np.linalg.norm(v[int(r.vertex)] - center)), kind="star")
+    prot = getattr(ms, "protrusions", None)
+    if prot is not None and len(prot):
+        for _, pr in prot.iterrows():
+            key = f"cp_{int(pr.protrusion_id)}"
+            if key in G:
+                G.nodes[key].update(source=str(pr.source), hull_depth=float(pr.tip_hull_depth_rel),
+                                    hull_height=float(pr.hull_height_rel) if np.isfinite(pr.hull_height_rel) else 0.0,
+                                    core_area=float(pr.core_area), core_height=float(pr.core_height_rel),
+                                    confidence=float(pr.confidence))
+        G.graph["n_protrusions"] = int(len(prot))
+        G.graph["protrusion_sources"] = prot.source.value_counts().to_dict()
+    G.nodes["center"].update(source="ms", origin="ms", origin_label="center", pair_extremum=-1)
+    G.graph["has_hull_origin"] = bool(n_hull > 0)
     if graph_type == "star+adjacency" and ms.boundary_edges.size:
         E = ms.boundary_edges
         l = np.linalg.norm(v[E[:, 0]] - v[E[:, 1]], axis=1)
@@ -496,6 +1079,13 @@ def create_ms_polydata(ms: MSComplex, vertices, faces) -> Tuple[pv.PolyData, pv.
     mesh.point_data["cell"] = ms.cell
     mesh.point_data["scalar"] = ms.scalar
     mesh.point_data["cp_type_raw"] = ms.cp_type_raw
+    if getattr(ms, "hull_depth", None) is not None:
+        mesh.point_data["hull_depth"] = ms.hull_depth
+        mesh.point_data["protrusion_core"] = ms.core_label
+        code = {"ms": 1, "hull": 2, "ms+hull": 3}
+        src = dict(zip(ms.protrusions.protrusion_id, ms.protrusions.source)) if ms.protrusions is not None else {}
+        lut = {int(m): code.get(src.get(int(m), "ms"), 1) for m in ms.maxima}
+        mesh.point_data["protrusion_source"] = np.array([lut.get(int(l), 0) for l in ms.label_max])
     bnd = pv.PolyData(v)
     if ms.boundary_edges.size:
         bnd.lines = np.c_[np.full(len(ms.boundary_edges), 2), ms.boundary_edges].ravel()
@@ -509,6 +1099,23 @@ def create_ms_polydata(ms: MSComplex, vertices, faces) -> Tuple[pv.PolyData, pv.
         cps.point_data["f_value"] = ms.critical["f"].to_numpy()
     return mesh, bnd, cps
 
+
+
+def create_hull_polydata(ms: MSComplex, vertices, faces) -> pv.PolyData:
+    """Convex hull used by the protrusion detection of ``ms`` (built on the same Taubin-smoothed geometry),
+    as a triangulated pyvista surface, for viewers. Empty PolyData if the complex has no hull results."""
+    if getattr(ms, "hull_depth", None) is None:
+        return pv.PolyData()
+    from scipy.spatial import ConvexHull
+    v = np.asarray(to_cpu(vertices), dtype=np.float64)
+    F = _as_faces(faces)
+    it = int(ms.meta.get("protrusion_params", {}).get("smooth_iters", PROTRUSION_DEFAULTS["smooth_iters"]))
+    vh = taubin_smooth(v, _neighbour_structure(v, F), it)
+    try:
+        hull = ConvexHull(vh)
+    except Exception:  # noqa: BLE001
+        hull = ConvexHull(vh, qhull_options="QJ")
+    return pv.PolyData(vh, np.c_[np.full(len(hull.simplices), 3), hull.simplices].ravel()).clean()
 
 
 #  Per-frame step used by the pipeline
@@ -529,13 +1136,20 @@ def ms_folders(target_folder):
 
 def compute_MS(vertices, faces, i, target_folder, scalar_field=None, scalar_method="dist_centroid",
                scalar_kwargs=None, persistence=0.05, min_region_area=0.0, build_graph=False,
-               graph_type="star", trimesh_obj=None, prev_vertices=None, p2p=None):
+               graph_type="star", trimesh_obj=None, prev_vertices=None, p2p=None, protrusion_params=None,
+               prev_faces=None, prev_ms=None, use_disk_prev=True):
     """
     Morse–Smale complex of frame ``i`` saved under <target>/MSComplexAnalysis/MS_Complex/MS_T####.pkl
     (+ Scalar_T####.npy, Labels_T####.npy) and, if build_graph, the critical-point graph under
     MS_Graphs/MSGraph_T####.pkl (readable by graph_time_analysis / graph_similarity).
     ``scalar_field`` may be given (e.g. the Reeb field of the same frame); otherwise it is computed
     with get_scalar_field(method=scalar_method, **scalar_kwargs).
+    Protrusions: the maxima of the field are fused with the convex-hull depth minima (Huang et al. 2024;
+    parameters: protrusion_params, else configure_protrusion_detection(), else PROTRUSION_DEFAULTS). With the
+    previous frame's complex (``prev_ms``, or MS_T{i-1}.pkl on disk when use_disk_prev) and ``p2p`` (current ->
+    previous, one entry per current vertex, as pipelines.compute_FM's p2p_zo; previous -> current also accepted),
+    weak hull candidates are confirmed by the protrusions of the previous frame (temporal hysteresis).
+    Extra files: HullDepth_T####.npy, Core_T####.npy (protrusion cores, -1 = body).
     """
     d = ms_folders(target_folder)
     v = np.asarray(to_cpu(vertices), dtype=np.float64)
@@ -543,11 +1157,30 @@ def compute_MS(vertices, faces, i, target_folder, scalar_field=None, scalar_meth
     if scalar_field is None:
         scalar_field = get_scalar_field(v, F, method=scalar_method, prev_vertices=prev_vertices, p2p=p2p,
                                         trimesh_obj=trimesh_obj, **(scalar_kwargs or {}))
-    ms = compute_ms_complex(v, F, scalar_field, persistence=persistence, frame=i, min_region_area=min_region_area)
+    cfg = protrusion_config(protrusion_params)
+    prev_tips = None
+    if cfg["enabled"] and cfg["temporal"] and p2p is not None and i > 0:
+        prev_file = d["complex"] / f'MS_T{i - 1:04d}.pkl'
+        if prev_ms is None and use_disk_prev and prev_file.exists():
+            try:
+                prev_ms = MSComplex.from_pickle(prev_file)
+            except Exception:  # noqa: BLE001
+                prev_ms = None
+        if prev_ms is not None:
+            try:
+                prev_tips = _map_previous_tips(prev_ms, p2p, v.shape[0], prev_vertices, prev_faces)
+            except Exception as exc:  # noqa: BLE001
+                warnings.warn(f"temporal protrusion support unavailable for frame {i} ({exc})")
+    ms = compute_ms_complex(v, F, scalar_field, persistence=persistence, frame=i, min_region_area=min_region_area,
+                            protrusion_params=cfg, prev_tips=prev_tips)
     ms.meta["scalar_method"] = scalar_method
+    ms.meta["temporal_tips"] = int(len(prev_tips)) if prev_tips is not None else 0
     ms.to_pickle(d["complex"] / f'MS_T{i:04d}.pkl')
     np.save(d["complex"] / f'Scalar_T{i:04d}.npy', np.asarray(scalar_field))
     np.save(d["complex"] / f'Labels_T{i:04d}.npy', ms.label_max)
+    if ms.hull_depth is not None:
+        np.save(d["complex"] / f'HullDepth_T{i:04d}.npy', ms.hull_depth)
+        np.save(d["complex"] / f'Core_T{i:04d}.npy', ms.core_label)
     if build_graph:
         G = ms_star_graph(ms, v, F, graph_type=graph_type)
         with open(d["graphs"] / f'MSGraph_T{i:04d}.pkl', 'wb') as fh:
@@ -558,7 +1191,7 @@ def compute_MS(vertices, faces, i, target_folder, scalar_field=None, scalar_meth
 def load_ms_sequence(target_folder) -> List[MSComplex]:
     d = ms_folders(target_folder)
     files = sorted(d["complex"].glob('MS_T*.pkl'), key=_frame_number)
-    return [MSComplex.from_pickle(f) for f in files]
+    return [MSComplex.from_pickle(f) for f in tqdm(files, desc="Loading MS complexes", leave=False)]
 
 
 
@@ -573,24 +1206,34 @@ def critical_points_report(target_folder, single_file=True):
         print("No Morse–Smale complexes found.")
         return None
     rows, detail = [], []
-    for ms in seq:
+    for ms in tqdm(seq, desc="Critical points report", leave=False):
         c = ms.counts()
         crit = ms.critical
         rows.append({"Time_Step": ms.frame, **c, "n_critical": sum(c.values()),
                      "euler_simplified": c["n_min"] - c["n_saddle"] + c["n_max"],
                      "n_max_raw": ms.meta["n_max_raw"], "n_min_raw": ms.meta["n_min_raw"],
                      "n_saddle_raw": ms.meta["n_saddle_raw"], "euler_raw": ms.meta["euler_raw"],
+                     # Morse–Euler check against the surface (#min − #saddle + #max = χ = V − E + F)
+                     "surface_euler": ms.meta.get("surface_euler"), "surface_genus": ms.meta.get("surface_genus"),
+                     "euler_consistent": (None if ms.meta.get("surface_euler") is None
+                                          else bool(c["n_min"] - c["n_saddle"] + c["n_max"] == ms.meta["surface_euler"])),
                      "n_regions": len(ms.maxima), "n_ms_cells": ms.meta["n_cells"],
                      "mean_region_area": float(np.mean(list(ms.region_areas().values()))) if len(ms.maxima) else 0.0,
                      "max_persistence_rel_mean": float(crit.loc[(crit.type == "maximum") & np.isfinite(crit.persistence_rel), "persistence_rel"].mean()),
                      "min_persistence_rel_mean": float(crit.loc[(crit.type == "minimum") & np.isfinite(crit.persistence_rel), "persistence_rel"].mean()),
                      "persistence_threshold_rel": ms.persistence_threshold / ms.meta["field_range"],
-                     "n_boundary_edges": int(len(ms.boundary_edges))})
+                     "n_boundary_edges": int(len(ms.boundary_edges)),
+                     "n_max_ms_field": int(ms.meta.get("n_max_ms", c["n_max"])),
+                     "n_protrusions_hull_only": int(ms.meta.get("n_protrusions_hull_only", 0)),
+                     "n_protrusions_both": int(ms.meta.get("n_protrusions_both", 0))})
         dd = crit.copy()
         dd.insert(0, "Time_Step", ms.frame)
         detail.append(dd)
     df = pd.DataFrame(rows)
+    from PynamicMesh.core.dyn_common import add_time_columns       # known frame times: Time column + time axis
+    df = add_time_columns(df, target_folder, frame_col="Time_Step")
     df.to_csv(d["root"] / 'critical_points.csv', index=False)
+    X_ = df.Time if "Time" in df else df.Time_Step
     pd.concat(detail, ignore_index=True).to_csv(d["root"] / 'critical_points_detail.csv', index=False)
 
     sns.set_theme(style="whitegrid")
@@ -598,23 +1241,23 @@ def critical_points_report(target_folder, single_file=True):
     ax = axes[0]
     for col, color, mk in (("n_max", CP_COLORS["maximum"], "^"), ("n_min", CP_COLORS["minimum"], "v"),
                            ("n_saddle", CP_COLORS["saddle"], "x"), ("n_critical", "k", "o")):
-        ax.plot(df.Time_Step, df[col], marker=mk, color=color, linewidth=2, label=col)
+        ax.plot(X_, df[col], marker=mk, color=color, linewidth=2, label=col)
     ax.set_title("Simplified critical points (Morse–Smale complex)", fontweight="bold")
     ax.set_ylabel("count"); ax.legend(ncol=4)
     ax = axes[1]
     for col, color, mk in (("n_max_raw", CP_COLORS["maximum"], "^"), ("n_min_raw", CP_COLORS["minimum"], "v"),
                            ("n_saddle_raw", CP_COLORS["saddle"], "x")):
-        ax.plot(df.Time_Step, df[col], marker=mk, color=color, linewidth=1.5, alpha=0.8, label=col)
-    ax.plot(df.Time_Step, df.euler_raw, color="grey", linestyle="--", label="Euler #min-#sad+#max")
+        ax.plot(X_, df[col], marker=mk, color=color, linewidth=1.5, alpha=0.8, label=col)
+    ax.plot(X_, df.euler_raw, color="grey", linestyle="--", label="Euler #min-#sad+#max")
     ax.set_title("Raw PL critical points (before persistence simplification)", fontweight="bold")
     ax.set_ylabel("count"); ax.legend(ncol=4)
     ax = axes[2]
-    ax.plot(df.Time_Step, df.n_regions, marker="s", color="tab:purple", label="protrusion regions")
-    ax.plot(df.Time_Step, df.n_ms_cells, marker="d", color="tab:brown", label="Morse–Smale cells")
+    ax.plot(X_, df.n_regions, marker="s", color="tab:purple", label="protrusion regions")
+    ax.plot(X_, df.n_ms_cells, marker="d", color="tab:brown", label="Morse–Smale cells")
     ax2 = ax.twinx()
-    ax2.plot(df.Time_Step, df.max_persistence_rel_mean, color=CP_COLORS["maximum"], linestyle=":", label="mean persistence of maxima")
+    ax2.plot(X_, df.max_persistence_rel_mean, color=CP_COLORS["maximum"], linestyle=":", label="mean persistence of maxima")
     ax2.set_ylabel("relative persistence")
-    ax.set_title("Segmentation size", fontweight="bold"); ax.set_ylabel("count"); ax.set_xlabel("Time step")
+    ax.set_title("Segmentation size", fontweight="bold"); ax.set_ylabel("count"); ax.set_xlabel(f"time ({df.Time_Unit.iloc[0]})" if "Time" in df else "Time step")
     h1, l1 = ax.get_legend_handles_labels(); h2, l2 = ax2.get_legend_handles_labels()
     ax.legend(h1 + h2, l1 + l2, loc="upper left")
     fig.tight_layout()
@@ -622,6 +1265,7 @@ def critical_points_report(target_folder, single_file=True):
     fig.savefig(out, dpi=200, bbox_inches="tight"); plt.close(fig)
     if single_file:
         print(f"Critical point report saved to {d['root'] / 'critical_points.csv'} and {out}")
+    protrusion_report(target_folder, single_file=single_file)
     return str(d["root"] / 'critical_points.csv')
 
 
@@ -645,12 +1289,11 @@ FATE_MEANING = {
 
 def forward_p2p_from_FM(FM_12, evects1, evects2):
     """Point-to-point map mesh1 -> mesh2 from C (k2 x k1): nearest neighbour of Φ1 Cᵀ in Φ2."""
-    from scipy.spatial import cKDTree
+    from PynamicMesh.core.accel import knn               # exact; GPU(s) when available, cKDTree otherwise
     k2, k1 = FM_12.shape
     emb1 = np.asarray(evects1)[:, :k1] @ np.asarray(FM_12).T
     emb2 = np.asarray(evects2)[:, :k2]
-    _, p2p_12 = cKDTree(emb2).query(emb1, k=1)
-    return np.asarray(p2p_12, dtype=np.int64)
+    return knn(emb2, emb1, k=1)
 
 
 def soft_region_transport(FM_12, mesh1, mesh2, label1, ids1, area1=None):
@@ -684,9 +1327,72 @@ def soft_region_transport(FM_12, mesh1, mesh2, label1, ids1, area1=None):
     return soft, conf, g
 
 
+def _majority_filter(labels, adj, iters=1):
+    """Each vertex takes the most frequent label of its closed 1-ring (ties keep the own label), `iters` times.
+    Removes the isolated speckle of a point-to-point transport without moving real region boundaries much."""
+    lab = np.asarray(labels, dtype=np.int64).copy()
+    n = lab.shape[0]
+    if iters <= 0 or n == 0:
+        return lab
+    coo = adj.tocoo()
+    i = np.r_[coo.row, np.arange(n)].astype(np.int64); j = np.r_[coo.col, np.arange(n)].astype(np.int64)
+    base = int(lab.max()) + 2
+    for _ in range(int(iters)):
+        key = i * base + lab[j]
+        uk, cnt = np.unique(key, return_counts=True)
+        ui = uk // base; ul = uk % base
+        order = np.lexsort((cnt, ui))
+        last = np.r_[ui[order][1:] != ui[order][:-1], True]
+        bi, bl, bc = ui[order][last], ul[order][last], cnt[order][last]
+        own_c = cnt[np.searchsorted(uk, np.arange(n) * base + lab)]
+        best_c = np.zeros(n, dtype=np.int64); best_c[bi] = bc
+        best_l = lab.copy(); best_l[bi] = bl
+        new = np.where(own_c >= best_c, lab, best_l)
+        if np.array_equal(new, lab):
+            break
+        lab = new
+    return lab
+
+
+def map_scatter(verts_prev, p2p_21, adj_curr):
+    """Per-vertex inconsistency of a point-to-point map (current -> previous): distance between the image of a
+    vertex and the mean image of its neighbours, on the previous mesh. ~0 for a smooth map; the size of the
+    jumps for a noisy one."""
+    vp = np.asarray(verts_prev, dtype=np.float64)
+    X = vp[np.asarray(p2p_21, dtype=np.int64)]
+    W = adj_curr.copy(); W.data = np.ones_like(W.data)
+    deg = np.maximum(np.asarray(W.sum(axis=1)).ravel(), 1.0)
+    return np.linalg.norm(X - (W @ X) / deg[:, None], axis=1)
+
+
+def expected_overlap(radius, eps):
+    """Overlap of a disk of radius r with itself shifted by eps (model of a perfectly tracked region whose
+    transport is displaced / blurred by eps): returns (IoU, fraction of the region kept) in [0, 1]."""
+    r = np.maximum(np.asarray(radius, dtype=np.float64), 1e-300)
+    u = np.clip(eps / (2.0 * r), 0.0, 1.0)
+    inter = (2.0 / np.pi) * (np.arccos(u) - u * np.sqrt(1.0 - u * u))        # intersection / disk area
+    return inter / np.maximum(2.0 - inter, 1e-300), inter
+
+
 class RegionTracker:
     """
     Tracks the Morse–Smale regions and critical points between consecutive frames.
+
+    Size-adaptive matching (adaptive=True, default).  The IoU a perfectly tracked region can reach depends on its
+    size: its transport is displaced / blurred by the map error and by the motion of the protrusion, ε, and a
+    region of radius r then overlaps itself at most IoU_exp(r) = IoU of a disk shifted by ε (≈1 for large regions,
+    0.1-0.4 for small blebs), so a fixed threshold rejects exactly the small protrusions. Per transition:
+      * the hard transport is cleaned by a majority filter on the 1-ring (label_smoothing iterations);
+      * ε = sqrt(scatter² + shift² + (h/2)²): scatter = median inconsistency of the p2p map (map_scatter), shift =
+        median displacement between the transported previous tip and the current tip over the pairs matched
+        confidently in a first pass (protrusion motion + map misalignment), h = mean edge length
+        (or map_error, fixed, as a fraction of sqrt(area));
+      * pair (a, b) is accepted if IoU >= max(min_iou, iou_threshold · IoU_exp(min(r_a, r_b))); the Hungarian
+        assignment maximises IoU / IoU_exp, so small and large regions compete on the same scale;
+      * split / merge dominance: dominance · (expected kept fraction of the region concerned);
+      * tip rescue: an unmatched previous region whose tip lands in an unmatched current region that it overlaps
+        is matched to it ('tip' match).
+    adaptive=False gives the previous fixed-threshold behaviour.
 
     Correspondence.  The previous segmentation is transported to the current mesh with the
     point-to-point map of the functional map (hard transport ``label_prev[p2p_21]``) and, when
@@ -715,10 +1421,17 @@ class RegionTracker:
     """
 
     def __init__(self, target_folder, iou_threshold=0.25, dominance=0.5, fate_radius=0.04,
-                 growth_tolerance=0.002, ghost_horizon=6):
+                 growth_tolerance=0.002, ghost_horizon=6, adaptive=True, min_iou=0.05, label_smoothing=1,
+                 tip_rescue=True, map_error=None, max_map_error=0.15):
         self.d = ms_folders(target_folder)
         self.iou_threshold = iou_threshold
         self.dominance = dominance
+        self.adaptive = bool(adaptive)
+        self.min_iou = float(min_iou)                 # absolute floor of the adaptive IoU threshold
+        self.label_smoothing = int(label_smoothing)   # majority-filter iterations of the hard transport
+        self.tip_rescue = bool(tip_rescue)
+        self.map_error = map_error                    # fixed ε / sqrt(area) (None = estimated per transition)
+        self.max_map_error = float(max_map_error)     # cap of the estimated ε / sqrt(area)
         self.fate_radius = fate_radius
         self.growth_tolerance = growth_tolerance
         self.ghost_horizon = ghost_horizon
@@ -798,7 +1511,9 @@ class RegionTracker:
         Ac, Ap = ms_curr.vertex_area, ms_prev.vertex_area
 
         # ---- transport of the previous segmentation -----------------------------------
-        hard = ms_prev.label_max[p2p_21]
+        adj_curr = _neighbour_structure(vc, Fc)
+        hard_raw = ms_prev.label_max[p2p_21]
+        hard = _majority_filter(hard_raw, adj_curr, self.label_smoothing) if self.adaptive else hard_raw
         soft, conf, p2p_12 = None, None, None
         if FM_12 is not None and mesh_prev is not None and mesh_curr is not None \
                 and getattr(mesh_prev, "eigenvectors", None) is not None and getattr(mesh_curr, "eigenvectors", None) is not None:
@@ -820,12 +1535,63 @@ class RegionTracker:
         IoU = O / np.maximum(area_mapped[:, None] + area_curr[None, :] - O, 1e-300)
         frac_prev = O / np.maximum(area_mapped[:, None], 1e-300)      # share of the previous region going to each current region
         frac_curr = O / np.maximum(area_curr[None, :], 1e-300)        # share of the current region coming from each previous region
+        scale = float(np.sqrt(Ac.sum()))
         matches: Dict[int, int] = {}
-        if O.size:
+        match_kind: Dict[int, str] = {}
+        thr = np.full(IoU.shape, float(self.iou_threshold))          # IoU threshold of every pair
+        e_iou = np.ones(IoU.shape); keep_p = np.ones(len(ids_p)); keep_c = np.ones(len(ids_c))
+        map_eps = np.nan; scatter = np.nan; shift = np.nan
+        if O.size and self.adaptive:
+            r_p = np.sqrt(np.maximum(area_mapped, 1e-300) / np.pi); r_c = np.sqrt(np.maximum(area_curr, 1e-300) / np.pi)
+            h = float(np.mean(np.linalg.norm(vc[Fc[:, 0]] - vc[Fc[:, 1]], axis=1)))
+            if self.map_error is not None:
+                map_eps = float(self.map_error) * scale
+            else:
+                scatter = float(np.median(map_scatter(vp, p2p_21, adj_curr)))
+                # motion of the protrusions + map misalignment: displacement between the image of the previous
+                # tip (through the p2p map) and the current tip, over the pairs confidently matched in a first pass
+                # (fixed threshold); the median is robust to basins whose maximum jumped to another bleb
+                first = IoU >= self.iou_threshold
+                shifts = []
+                if first.any():
+                    adj_p0 = _neighbour_structure(vp, Fp)
+                    ra, cb = linear_sum_assignment(-np.where(first, IoU, 0.0))
+                    for a, b in zip(ra, cb):
+                        if first[a, b]:
+                            j, _ = self._image_vertex(ids_p[a], p2p_21, None, adj_p0)
+                            if j >= 0:
+                                shifts.append(float(np.linalg.norm(vc[j] - vc[ids_c[b]])))
+                shift = float(np.median(shifts)) if shifts else 0.0
+                map_eps = float(np.sqrt(scatter ** 2 + shift ** 2 + (0.5 * h) ** 2))
+            map_eps = min(map_eps, self.max_map_error * scale)
+            r_min = np.minimum(r_p[:, None], r_c[None, :])
+            e_iou, _ = expected_overlap(r_min, map_eps)
+            _, keep_p = expected_overlap(r_p, map_eps); _, keep_c = expected_overlap(r_c, map_eps)
+            thr = np.maximum(self.min_iou, self.iou_threshold * e_iou)
+            score = np.where((IoU >= thr) & (O > 0), IoU / np.maximum(e_iou, 1e-3), 0.0)
+            ra, cb = linear_sum_assignment(-score)
+            for a, b in zip(ra, cb):
+                if score[a, b] > 0:
+                    matches[ids_p[a]] = ids_c[b]; match_kind[ids_p[a]] = "iou"
+        elif O.size:
             r, c = linear_sum_assignment(-IoU)
             for a, b in zip(r, c):
                 if IoU[a, b] >= self.iou_threshold:
-                    matches[ids_p[a]] = ids_c[b]
+                    matches[ids_p[a]] = ids_c[b]; match_kind[ids_p[a]] = "iou"
+        if self.tip_rescue and self.adaptive and O.size:
+            adj_prev_ = _neighbour_structure(vp, Fp)
+            taken = set(matches.values())
+            for a, pm in enumerate(ids_p):
+                if pm in matches:
+                    continue
+                j, _ = self._image_vertex(pm, p2p_21, None, adj_prev_)
+                if j < 0:
+                    continue
+                cm = int(ms_curr.label_max[j]); b = ic.get(cm, -1)
+                if b >= 0 and cm not in taken and O[a, b] > 0 and IoU[a, b] >= 0.5 * self.min_iou:
+                    matches[pm] = cm; match_kind[pm] = "tip"; taken.add(cm)
+        dom_thr_p = self.dominance * (keep_p if self.adaptive else np.ones(len(ids_p)))
+        dom_thr_c = self.dominance * (keep_c if self.adaptive else np.ones(len(ids_c)))
         inv_matches = {c_: p_ for p_, c_ in matches.items()}
         dom_parent = {ids_c[b]: ids_p[int(np.argmax(frac_curr[:, b]))] for b in range(len(ids_c))} if len(ids_p) else {}
         dom_child = {ids_p[a]: ids_c[int(np.argmax(frac_prev[a]))] for a in range(len(ids_p))} if len(ids_c) else {}
@@ -835,6 +1601,8 @@ class RegionTracker:
         pers_p = dict(zip(ms_prev.critical.vertex, ms_prev.critical.persistence_rel))
         pers_c = dict(zip(ms_curr.critical.vertex, ms_curr.critical.persistence_rel))
         n_ev = {"continue": 0, "split": 0, "merge": 0, "birth": 0, "death": 0}
+        src_p = dict(zip(ms_prev.protrusions.protrusion_id, ms_prev.protrusions.source)) if getattr(ms_prev, "protrusions", None) is not None else {}
+        src_c = dict(zip(ms_curr.protrusions.protrusion_id, ms_curr.protrusions.source)) if getattr(ms_curr, "protrusions", None) is not None else {}
 
         def link(p, c_, ev, tid_prev):
             self.lineage.append({"Transition": f"T{fp} -> T{fc}", "Time_Step": fc, "track_id": tid_prev,
@@ -846,7 +1614,11 @@ class RegionTracker:
                                  "overlap_fraction_curr": float(frac_curr[ip[p], ic[c_]]) if (c_ >= 0 and p >= 0) else 0.0,
                                  "area_prev": areas_p.get(p, 0.0), "area_curr": areas_c.get(c_, 0.0),
                                  "area_change_rel": (areas_c.get(c_, 0.0) - areas_p.get(p, 0.0)) / max(areas_p.get(p, 0.0), 1e-300) if p >= 0 else np.nan,
-                                 "persistence_prev": pers_p.get(p, np.nan), "persistence_curr": pers_c.get(c_, np.nan)})
+                                 "persistence_prev": pers_p.get(p, np.nan), "persistence_curr": pers_c.get(c_, np.nan),
+                                 "source_prev": src_p.get(p, "ms" if p >= 0 else ""), "source_curr": src_c.get(c_, "ms" if c_ >= 0 else ""),
+                                 "match_kind": match_kind.get(p, "") if (p >= 0 and matches.get(p, -1) == c_ and c_ >= 0) else "",
+                                 "iou_threshold_used": float(thr[ip[p], ic[c_]]) if (c_ >= 0 and p >= 0) else np.nan,
+                                 "expected_IoU": float(e_iou[ip[p], ic[c_]]) if (c_ >= 0 and p >= 0) else np.nan})
 
         # matched pairs continue their track; split children of a matched parent
         for p in ids_p:
@@ -857,11 +1629,11 @@ class RegionTracker:
         for p in ids_p:
             tid = self._tid(fp, p)
             children = [c_ for c_ in ids_c if c_ not in inv_matches and dom_parent.get(c_) == p
-                        and frac_curr[ip[p], ic[c_]] >= self.dominance]
+                        and frac_curr[ip[p], ic[c_]] >= dom_thr_c[ic[c_]]]
             if p in matches:
                 c_ = matches[p]
                 parents_of_c = [q for q in ids_p if q != p and q not in matches and dom_child.get(q) == c_
-                                and frac_prev[ip[q], ic[c_]] >= self.dominance]
+                                and frac_prev[ip[q], ic[c_]] >= dom_thr_p[ip[q]]]
                 ev = "split" if children else ("merge" if parents_of_c else "continue")
                 n_ev[ev] += 1
                 link(p, c_, ev, tid)
@@ -870,7 +1642,7 @@ class RegionTracker:
                     link(p, c2, "split", tid)
             else:
                 c_ = dom_child.get(p, -1)
-                if c_ >= 0 and frac_prev[ip[p], ic[c_]] >= self.dominance:
+                if c_ >= 0 and frac_prev[ip[p], ic[c_]] >= dom_thr_p[ip[p]]:
                     if c_ not in inv_matches and dom_parent.get(c_) == p:
                         # unmatched pair that dominate each other (IoU below threshold): continue
                         self.track_of[(fc, c_)] = tid
@@ -883,7 +1655,7 @@ class RegionTracker:
             if (fc, c_) in self.track_of:
                 continue
             p = dom_parent.get(c_, -1)
-            if p >= 0 and frac_curr[ip[p], ic[c_]] >= self.dominance and p in matches:
+            if p >= 0 and frac_curr[ip[p], ic[c_]] >= dom_thr_c[ic[c_]] and p in matches:
                 self._tid(fc, c_)                           # split child (already linked above if dominant)
                 if not any(r_["curr_max_vertex"] == c_ and r_["Time_Step"] == fc for r_ in self.lineage):
                     n_ev["split"] += 1; link(p, c_, "split", self._tid(fp, p))
@@ -894,9 +1666,8 @@ class RegionTracker:
                 self.lineage[-1]["curr_track_id"] = tid
 
         # ---- fate of every critical point + trajectories ---------------------------------
-        adj_prev = _neighbour_structure(vp, Fp); adj_curr = _neighbour_structure(vc, Fc)
+        adj_prev = _neighbour_structure(vp, Fp)
         Np = _vertex_normals(vp, Fp)
-        scale = float(np.sqrt(Ac.sum()))
         radius = self.fate_radius * scale
         frange_p = ms_prev.meta["field_range"]
         rank_p = _total_order(ms_prev.scalar) / max(len(ms_prev.scalar) - 1, 1)
@@ -990,6 +1761,13 @@ class RegionTracker:
         self.summary.append({"Transition": f"T{fp} -> T{fc}", "Time_Step": fc, **{f"n_{k}": val for k, val in n_ev.items()},
                              "n_regions_prev": len(ids_p), "n_regions_curr": len(ids_c),
                              "mean_IoU_matched": float(np.mean([IoU[ip[a], ic[b]] for a, b in matches.items()])) if matches else np.nan,
+                             "n_matched": len(matches), "n_matched_tip": int(sum(k == "tip" for k in match_kind.values())),
+                             "matched_fraction_prev": len(matches) / max(len(ids_p), 1),
+                             "mean_IoU_normalised": float(np.mean([IoU[ip[a], ic[b]] / max(e_iou[ip[a], ic[b]], 1e-3)
+                                                                   for a, b in matches.items()])) if matches else np.nan,
+                             "map_error_rel": map_eps / scale if np.isfinite(map_eps) else np.nan,
+                             "map_scatter_rel": scatter / scale if np.isfinite(scatter) else np.nan,
+                             "region_shift_rel": shift / scale if np.isfinite(shift) else np.nan,
                              "soft_confidence_mean": float(np.mean(conf)) if conf is not None else np.nan,
                              "hard_soft_agreement": float(np.mean(soft == hard)) if soft is not None else np.nan,
                              "max_kept": fate_counts.get(("maximum", "maximum"), 0),
@@ -1008,7 +1786,11 @@ class RegionTracker:
         if save:
             rows_fc = [r_ for r_ in self.fates if r_["Time_Step"] == fc]
             np.savez_compressed(self.d["tracking"] / f'mapped_T{fp:04d}_T{fc:04d}.npz',
-                                hard_label=hard, soft_label=soft if soft is not None else np.array([]),
+                                hard_label=hard, hard_label_raw=hard_raw, soft_label=soft if soft is not None else np.array([]),
+                                match_kind=np.array([match_kind.get(k_, "") for k_ in matches.keys()]),
+                                match_threshold=np.array([thr[ip[a], ic[b]] for a, b in matches.items()]),
+                                map_error=np.array(map_eps / scale if np.isfinite(map_eps) else np.nan),
+                                adaptive=np.array(self.adaptive),
                                 soft_confidence=conf if conf is not None else np.array([]),
                                 prev_ids=np.array(ids_p), curr_ids=np.array(ids_c), IoU=IoU,
                                 match_prev=np.array(list(matches.keys()), dtype=np.int64),
@@ -1056,6 +1838,11 @@ class RegionTracker:
     def save(self):
         d = self.d["tracking"]
         lineage = pd.DataFrame(self.lineage); fates = pd.DataFrame(self.fates); summary = pd.DataFrame(self.summary)
+        from PynamicMesh.core.dyn_common import add_time_columns, find_frame_times
+        ft = find_frame_times(self.d["root"])                         # Results/<scene>/frame_times.csv, if any
+        if ft is not None and len(summary) and "Time_Step" in summary:   # events per time unit (irregular intervals)
+            summary = add_time_columns(summary, self.d["root"], frame_col="Time_Step",
+                                       rate_cols=[c for c in summary.columns if c.startswith("n_") and not c.startswith("n_regions")])
         lineage.to_csv(d / 'region_lineage.csv', index=False)
         fates.to_csv(d / 'critical_point_fates.csv', index=False)
         summary.to_csv(d / 'tracking_summary.csv', index=False)
@@ -1074,7 +1861,14 @@ class RegionTracker:
                                "died": int((lineage[(lineage.track_id == tid) & (lineage.event.isin(["death", "merge"]))]).shape[0] > 0),
                                "mean_normal_growth": float(nd.mean()) if len(nd) else np.nan,
                                "persistence_start": float(g.persistence_curr.iloc[0]), "persistence_end": float(g.persistence_curr.iloc[-1])})
-            pd.DataFrame(tracks).sort_values("track_id").to_csv(d / 'region_tracks.csv', index=False)
+            tracks = pd.DataFrame(tracks).sort_values("track_id")
+            if ft is not None and len(tracks) and tracks.last_frame.max() < len(ft):   # lifetimes in time units
+                tracks["first_time"] = ft.t[tracks.first_frame.clip(lower=0).to_numpy()]
+                tracks["last_time"] = ft.t[tracks.last_frame.to_numpy()]
+                tracks["lifetime"] = tracks.last_time - tracks.first_time
+                tracks["mean_normal_growth_rate"] = tracks.mean_normal_growth * (tracks.n_frames / tracks.lifetime.where(tracks.lifetime > 0))
+                tracks["time_unit"] = ft.unit
+            tracks.to_csv(d / 'region_tracks.csv', index=False)
         rows = []
         for tr in self.traj:
             rows.append({"origin_frame": tr["origin_frame"], "origin_vertex": tr["origin_vertex"], "origin_type": tr["origin_type"],
@@ -1099,6 +1893,7 @@ def tracking_report(target_folder, single_file=True):
         print("No tracking results found.")
         return None
     summary = pd.read_csv(tdir / 'tracking_summary.csv')
+    X_ = summary.Time if "Time" in summary else summary.Time_Step
     fates = pd.read_csv(tdir / 'critical_point_fates.csv')
     lineage = pd.read_csv(tdir / 'region_lineage.csv')
     sns.set_theme(style="whitegrid")
@@ -1117,18 +1912,18 @@ def tracking_report(target_folder, single_file=True):
     ax = axes[0]
     for col, color in (("n_continue", "tab:blue"), ("n_split", "tab:orange"), ("n_merge", "tab:green"),
                        ("n_birth", "tab:red"), ("n_death", "tab:gray")):
-        ax.plot(summary.Time_Step, summary[col], marker="o", color=color, label=col[2:])
+        ax.plot(X_, summary[col], marker="o", color=color, label=col[2:])
     ax.set_title("Region events per transition (protrusion lineage)", fontweight="bold"); ax.set_ylabel("regions"); ax.legend(ncol=5)
     ax = axes[1]
     for col, color, mk in (("max_kept", CP_COLORS["maximum"], "^"), ("max_to_saddle", CP_COLORS["saddle"], "x"),
                            ("max_to_min", CP_COLORS["minimum"], "v"), ("max_flattened", "grey", "."),
                            ("min_to_max", "tab:pink", "^"), ("saddle_kept", "tab:cyan", "s"), ("saddle_to_max", "tab:olive", "*")):
-        ax.plot(summary.Time_Step, summary[col], marker=mk, color=color, label=col.replace("_", " "))
+        ax.plot(X_, summary[col], marker=mk, color=color, label=col.replace("_", " "))
     ax.set_title("Fates of the extrema", fontweight="bold"); ax.set_ylabel("critical points"); ax.legend(ncol=3, fontsize=8)
     ax = axes[2]
-    ax.bar(summary.Time_Step, summary.fraction_growing, color=CP_COLORS["maximum"], alpha=0.6, label="fraction growing")
-    ax.bar(summary.Time_Step, -summary.fraction_retracting, color=CP_COLORS["minimum"], alpha=0.6, label="fraction retracting")
-    ax2 = ax.twinx(); ax2.plot(summary.Time_Step, summary.mean_normal_growth, color="k", marker="d", label="mean normal growth of maxima")
+    ax.bar(X_, summary.fraction_growing, color=CP_COLORS["maximum"], alpha=0.6, label="fraction growing")
+    ax.bar(X_, -summary.fraction_retracting, color=CP_COLORS["minimum"], alpha=0.6, label="fraction retracting")
+    ax2 = ax.twinx(); ax2.plot(X_, summary.mean_normal_growth, color="k", marker="d", label="mean normal growth of maxima")
     ax2.axhline(0, color="k", linewidth=0.5); ax2.set_ylabel("normal displacement / sqrt(area)")
     ax.set_ylim(-1, 1); ax.set_ylabel("fraction of protrusions"); ax.set_xlabel("Time step")
     ax.set_title("Protrusion growth (image displacement along the surface normal)", fontweight="bold")
@@ -1173,15 +1968,23 @@ def tracking_report(target_folder, single_file=True):
                 for f_, t_ in zip(r.frames.split(","), r.type_sequence.split(",")):
                     grid[i_, col[int(f_)]] = code.get(t_, np.nan)
             cmap = matplotlib.colors.ListedColormap([CP_COLORS["regular"], CP_COLORS["minimum"], CP_COLORS["saddle"], CP_COLORS["maximum"]])
-            fig, ax = plt.subplots(figsize=(max(6, 0.6 * len(frames_all) + 3), max(4, 0.16 * len(tr) + 1.5)))
+            nr = len(tr)
+            H = min(60.0, max(4.0, 0.2 * nr + 2.0))                     # 0.2 inch per row (readable 6-pt labels)
+            k = max(1, int(np.ceil(0.2 * nr / max(H - 2.0, 1e-9))))     # very long lists: every k-th label
+            fig, ax = plt.subplots(figsize=(max(7, 0.45 * len(frames_all) + 6), H))
             im = ax.imshow(grid, aspect="auto", cmap=cmap, vmin=-0.5, vmax=3.5, interpolation="nearest")
             ax.set_xticks(range(len(frames_all))); ax.set_xticklabels(frames_all)
-            ax.set_yticks(range(len(tr))); ax.set_yticklabels([f"{t[:3]} v{v} (T{f_})" for t, v, f_ in zip(tr.origin_type, tr.origin_vertex, tr.origin_frame)], fontsize=6)
-            cb = fig.colorbar(im, ax=ax, ticks=[0, 1, 2, 3]); cb.ax.set_yticklabels(["regular", "minimum", "saddle", "maximum"])
+            rows_ = np.arange(nr)[::k]
+            ax.set_yticks(rows_); ax.set_yticklabels([f"{t[:3]} v{v} (T{f_})" for t, v, f_ in
+                                                      zip(tr.origin_type.iloc[::k], tr.origin_vertex.iloc[::k], tr.origin_frame.iloc[::k])], fontsize=6)
+            # colorbar first (it takes its space from the axes), then the twin axis with the fate of every row, which
+            # sits between the image and the colorbar
+            cb = fig.colorbar(im, ax=ax, ticks=[0, 1, 2, 3], pad=0.16, fraction=0.025)
+            cb.ax.set_yticklabels(["regular", "minimum", "saddle", "maximum"])
+            ax2 = ax.twinx(); ax2.set_ylim(ax.get_ylim()); ax2.set_yticks(rows_)
+            ax2.set_yticklabels(list(tr.long_fate.iloc[::k]), fontsize=6); ax2.grid(False); ax2.set_ylabel("fate", fontsize=8)
             ax.set_xlabel("Time step"); ax.set_title("Type of every critical point followed through the maps (rows: origin)", fontweight="bold")
-            for i_, r in tr.iterrows():
-                ax.text(len(frames_all) - 0.4, i_, r.long_fate, fontsize=5, va="center")
-            fig.tight_layout(); fig.savefig(d["plots"] / 'critical_point_trajectories.png', dpi=200, bbox_inches="tight"); plt.close(fig)
+            fig.savefig(d["plots"] / 'critical_point_trajectories.png', dpi=200, bbox_inches="tight"); plt.close(fig)
             counts = tr.groupby(["origin_type", "long_fate"]).size().unstack(fill_value=0)
             counts.to_csv(tdir / 'long_fate_counts.csv')
     if single_file:
@@ -1233,4 +2036,4 @@ def track_sequence_from_disk(mesh_folder, target_folder, loader, matrix_folder=N
                                    np.load(p2p_file), FM_12=FM, mesh_prev=prev, mesh_curr=mesh)
         prev = mesh
     tracker.save()
-    return tracker
+    return tracker
