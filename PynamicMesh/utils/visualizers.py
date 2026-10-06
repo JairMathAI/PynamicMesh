@@ -1,3 +1,4 @@
+import functools
 import numpy as np
 from pyFM.functional import FunctionalMapping
 import pyvista as pv
@@ -10,7 +11,7 @@ import os
 import numpy as np
 import pyvista as pv
 from pathlib import Path
-from PynamicMesh.utils.tools import  mesh_mat2object , natural_sort_key
+from PynamicMesh.utils.tools import  mesh_mat2object , natural_sort_key, load_aligned_mesh
 from PynamicMesh.core.physic_model import computing_fields, create_pv_polydata, pv_field_name, FIELD_KEYS
 import pandas as pd
 from PynamicMesh.core.reeb_graph import create_reeb_polydata
@@ -26,6 +27,415 @@ PAIR_COLORS = np.array([[0.12, 0.47, 0.71], [1.00, 0.50, 0.05], [0.17, 0.63, 0.1
                         [0.55, 0.34, 0.29], [0.89, 0.47, 0.76], [0.74, 0.74, 0.13], [0.09, 0.75, 0.81], [0.68, 0.78, 0.91],
                         [1.00, 0.73, 0.47], [0.60, 0.87, 0.54], [1.00, 0.60, 0.59], [0.77, 0.69, 0.84], [0.77, 0.61, 0.58],
                         [0.97, 0.71, 0.82], [0.86, 0.86, 0.55], [0.62, 0.85, 0.90]])
+
+
+
+# --------------------------------------------------------------------------------------------------------
+#  Shared UI helpers (all viewers)
+# --------------------------------------------------------------------------------------------------------
+HELP_FOOTER = "\n\nCommon keys:\n  i : show / hide these instructions\n  r : reset the camera\n  q : close the window"
+
+
+_RENDERER_INFO = None
+_SOFTWARE_HINTS = ("llvmpipe", "softpipe", "swiftshader", "mesa offscreen", "microsoft basic render", "gdi generic",
+                   "software rasterizer", "osmesa", "warp")
+
+
+def renderer_info(refresh=False):
+    """
+    Detects the OpenGL device VTK renders with: {'gpu': bool, 'renderer': str, 'vendor': str}.  VTK / pyvista
+    always render through OpenGL, so a discrete or integrated GPU is used automatically whenever the driver
+    exposes it; this probe only tells whether that happened or whether a software rasterizer (llvmpipe,
+    Microsoft Basic Render Driver, ...) is in use.  The result is cached (one hidden render window).
+    """
+    global _RENDERER_INFO
+    if _RENDERER_INFO is not None and not refresh:
+        return _RENDERER_INFO
+    info = {'gpu': False, 'renderer': 'unknown', 'vendor': 'unknown'}
+    try:
+        import vtk
+        rw = vtk.vtkRenderWindow(); rw.SetOffScreenRendering(1); rw.SetSize(8, 8); rw.Render()
+        caps = rw.ReportCapabilities() or ""
+        rw.Finalize()
+        for line in caps.splitlines():
+            low = line.lower()
+            if low.startswith("opengl renderer string"):
+                info['renderer'] = line.split(":", 1)[1].strip()
+            elif low.startswith("opengl vendor string"):
+                info['vendor'] = line.split(":", 1)[1].strip()
+        info['gpu'] = info['renderer'] != 'unknown' and not any(h in info['renderer'].lower() for h in _SOFTWARE_HINTS)
+    except Exception:  # noqa: BLE001
+        pass
+    _RENDERER_INFO = info
+    return info
+
+
+def configure_rendering(pl):
+    """
+    Tunes a plotter for the detected device.  On a GPU: FXAA anti-aliasing and depth peeling (correct,
+    smooth transparency of the translucent meshes) - both cheap on hardware and costly in software.  On a
+    software rasterizer they are disabled and point sprites replace sphere impostors so that frame changes
+    stay interactive.  Returns the renderer_info() dict.
+    """
+    info = renderer_info()
+    try:
+        import pyvista as pv
+        if info['gpu']:
+            pl.enable_anti_aliasing('fxaa')
+            try:
+                pl.enable_depth_peeling(number_of_peels=4, occlusion_ratio=0.0)
+            except Exception:  # noqa: BLE001
+                pass
+            pv.global_theme.render_points_as_spheres = True
+        else:
+            pl.disable_anti_aliasing()
+            pv.global_theme.render_points_as_spheres = False
+            pv.global_theme.smooth_shading = False
+    except Exception:  # noqa: BLE001
+        pass
+    return info
+
+
+def show_instructions_window(title, text):
+    """
+    Pops up a small, comfortable read-only window (tkinter) with the instructions of a viewer: monospace
+    text, scrollbar, Close button, Esc closes.  The 3-D window is paused while it is open.  Returns False
+    when tkinter is not available (the caller then falls back to an on-screen text panel).
+    """
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        root = tk.Tk(); root.withdraw()
+        win = tk.Toplevel(root); win.title(f"Instructions - {title}")
+        try:
+            win.attributes('-topmost', True)
+        except Exception:  # noqa: BLE001
+            pass
+        frame = ttk.Frame(win, padding=10); frame.pack(fill='both', expand=True)
+        n_lines = text.count('\n') + 2
+        txt = tk.Text(frame, wrap='word', font=('Consolas', 11), width=96, height=min(34, max(8, n_lines)),
+                      padx=14, pady=10, bg='#fffbe6', relief='flat')
+        sb = ttk.Scrollbar(frame, orient='vertical', command=txt.yview); txt.configure(yscrollcommand=sb.set)
+        txt.insert('1.0', text); txt.configure(state='disabled')
+        txt.grid(row=0, column=0, sticky='nsew'); sb.grid(row=0, column=1, sticky='ns')
+        frame.rowconfigure(0, weight=1); frame.columnconfigure(0, weight=1)
+        ttk.Button(frame, text='Close  (Esc)', command=win.destroy).grid(row=1, column=0, columnspan=2, pady=(8, 0))
+        win.bind('<Escape>', lambda e: win.destroy()); win.protocol('WM_DELETE_WINDOW', win.destroy)
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        x = (win.winfo_screenwidth() - w) // 2; y = (win.winfo_screenheight() - h) // 3
+        win.geometry(f"+{x}+{y}"); win.lift(); win.focus_force()
+        root.wait_window(win); root.destroy()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+SCREENSHOT_NOTE_MS = 1800          # how long the "screenshot saved" message stays on screen (ms)
+
+
+def screenshot_path(folder, name, frame=None):
+    """
+    Next free screenshot file: <folder>/<name>_T<frame:04d>_<n:02d>.png (or <name>_<n:02d>.png without a frame).
+    n counts the screenshots of that frame and continues from the files already on disk, so a new screenshot
+    (another angle of the same frame, or a later session) never overwrites an older one.
+    """
+    folder = Path(folder); folder.mkdir(parents=True, exist_ok=True)
+    stem = f"{name}_T{int(frame):04d}" if frame is not None else str(name)
+    n = 1
+    while (folder / f"{stem}_{n:02d}.png").exists():
+        n += 1
+    return folder / f"{stem}_{n:02d}.png"
+
+
+def show_notification_window(title, text):
+    """
+    Small message window in the style of the instructions window (tkinter), NOT blocking: it is drawn at once and
+    returned (its Tk root) so the caller can keep it painted and close it; None when tkinter is not available.
+    """
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        root = tk.Tk(); root.withdraw()
+        win = tk.Toplevel(root); win.title(title)
+        for attr in ('-topmost', '-disabled'):             # on top, but never takes the keyboard from the 3-D window
+            try:                                           # ('-disabled' exists on Windows only)
+                win.attributes(attr, True)
+            except Exception:  # noqa: BLE001
+                pass
+        frame = ttk.Frame(win, padding=10); frame.pack(fill='both', expand=True)
+        tk.Label(frame, text=text, font=('Consolas', 11), bg='#fffbe6', justify='left', padx=14, pady=10,
+                 wraplength=900).pack(fill='both', expand=True)
+        ttk.Label(frame, text='(closes automatically)', foreground='gray').pack(pady=(6, 0))
+        win.protocol('WM_DELETE_WINDOW', root.destroy)
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        x = (win.winfo_screenwidth() - w) // 2; y = max((win.winfo_screenheight() - h) // 6, 0)
+        win.geometry(f"+{x}+{y}")
+        win.update()
+        return root
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def show_notification(pl, text, title="Screenshot saved", duration_ms=SCREENSHOT_NOTE_MS):
+    """
+    Shows `text` in a self-closing window (show_notification_window) for `duration_ms`; the 3-D window keeps
+    running (a VTK timer keeps the message painted and closes it). Without tkinter the text appears on the
+    3-D window itself and is removed by the same timer.
+    """
+    import time as _time
+    t_end = _time.time() + duration_ms / 1000.0
+    n_steps = max(int(duration_ms / 100) + 3, 3)
+    root = show_notification_window(title, text)
+    if root is not None:
+        def pump(step):
+            try:
+                if _time.time() >= t_end or step >= n_steps - 1:
+                    root.destroy()
+                else:
+                    root.update()
+            except Exception:  # noqa: BLE001 - already closed by the user
+                pass
+        try:
+            pl.add_timer_event(max_steps=n_steps, duration=100, callback=pump)
+            return
+        except Exception:  # noqa: BLE001 - no interactor timer: short blocking display
+            try:
+                root.after(int(duration_ms), root.quit); root.mainloop(); root.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+    try:                                                  # fallback: on-screen message
+        pl.add_text(f"{title}\n{text}", name='screenshot_note', position='upper_edge', font_size=9, color='darkgreen')
+        pl.render()
+
+        def remove(step):
+            if step >= n_steps - 1 or _time.time() >= t_end:
+                try:
+                    pl.remove_actor('screenshot_note', render=True)
+                except Exception:  # noqa: BLE001
+                    pass
+        pl.add_timer_event(max_steps=n_steps, duration=100, callback=remove)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def save_screenshot(pl, folder, name, frame=None, notify=True):
+    """Saves the current view to screenshot_path(folder, name, frame) and tells it in a self-closing message
+    (no print on the console: the user is looking at the viewer). Returns the path."""
+    out = screenshot_path(folder, name, frame)
+    try:
+        pl.screenshot(str(out))
+    except Exception as exc:  # noqa: BLE001
+        if notify:
+            show_notification(pl, f"could not save the screenshot:\n{exc}", title="Screenshot failed")
+        return None
+    if notify:
+        show_notification(pl, f"{out}")
+    return out
+
+
+def default_screenshot_dir(*parts):
+    """Screenshots of viewers that know no results folder: <working directory>/Screenshots/<parts>."""
+    return Path.cwd().joinpath("Screenshots", *[str(p_) for p_ in parts])
+
+
+# --------------------------------------------------------------------------- #
+#  Fluid interaction: cached meshes, one render per key press, space = GIF
+# --------------------------------------------------------------------------- #
+
+@functools.lru_cache(maxsize=96)
+def _cached_mesh(path):
+    """mesh_mat2object with the most recent meshes kept in memory: stepping back and forth through the frames
+    no longer re-reads the files (read-only use: the viewers build their own pyvista copies)."""
+    return mesh_mat2object(path)
+
+
+def _batch_key_callbacks(pl):
+    """Every key callback of the viewer runs with rendering suppressed and renders ONCE at the end (pyvista renders
+    after every add_mesh / add_text otherwise: a frame with many actors was rendered many times). pyvista's own
+    callbacks (close, ...) and callbacks marked _no_batch (the GIF recorder) are left as they are."""
+    try:
+        cbs = pl.iren._key_press_event_callbacks
+    except Exception:  # noqa: BLE001
+        return
+    for key, fns in cbs.items():
+        for n, fn in enumerate(list(fns)):
+            if getattr(fn, "_batched", False) or getattr(fn, "_no_batch", False) or \
+                    str(getattr(fn, "__module__", "") or "").startswith("pyvista"):
+                continue
+
+            def wrapped(fn=fn):
+                if getattr(pl, "_closed", False):
+                    return fn()
+                pl.suppress_rendering = True
+                try:
+                    fn()
+                finally:
+                    pl.suppress_rendering = False
+                try:
+                    pl.render()
+                except Exception:  # noqa: BLE001 - window closed by the callback
+                    pass
+            wrapped._batched = True
+            fns[n] = wrapped
+
+
+def _next_gif_path(folder):
+    """<folder>/screenshot_<n>.gif with the first n not used yet (earlier captures and pipeline GIFs are kept)."""
+    folder = Path(folder); folder.mkdir(parents=True, exist_ok=True)
+    n = 1
+    while (folder / f"screenshot_{n}.gif").exists():
+        n += 1
+    return folder / f"screenshot_{n}.gif"
+
+
+def install_gif_capture(pl, get_frame, n_frames, gif_dir, results_folder=None, step_key='Right', back_key='Left'):
+    """
+    space: GIF of the sequence exactly as the viewer shows it NOW - the camera of every panel and every option
+    chosen in the viewer are kept while the viewer's own step keys move through all the frames (from the first to
+    the last); the viewer then returns to the frame it was showing. Saved as <gif_dir>/screenshot_<n>.gif.
+    Frame durations follow the acquisition times when they are known (Results/<scene>/frame_times.csv).
+    """
+    from PynamicMesh.utils.gif_export import write_gif, frame_durations, GIF_DEFAULTS
+
+    def capture():
+        cbs = pl.iren._key_press_event_callbacks
+        n = int(n_frames() if callable(n_frames) else n_frames)
+        if n < 1:
+            return
+
+        def press(key, k=1):
+            for _ in range(int(k)):
+                for f in list(cbs.get(key, [])):
+                    f()
+        cams = []
+        for r in pl.renderers:
+            c = r.GetActiveCamera()
+            cams.append((c.GetPosition(), c.GetFocalPoint(), c.GetViewUp(), c.GetViewAngle(), c.GetParallelScale()))
+
+        def restore_cameras():
+            for r, (pos, foc, up, ang, ps) in zip(pl.renderers, cams):
+                c = r.GetActiveCamera(); c.SetPosition(pos); c.SetFocalPoint(foc); c.SetViewUp(up)
+                c.SetViewAngle(ang); c.SetParallelScale(ps); r.ResetCameraClippingRange()
+        f0 = int(get_frame())
+        pl.suppress_rendering = True
+        try:
+            press(back_key, f0)                        # to the first frame
+        finally:
+            pl.suppress_rendering = False
+        idx = set(np.unique(np.linspace(0, n - 1, min(n, GIF_DEFAULTS["max_frames"])).round().astype(int)).tolist())
+        imgs, kept = [], []
+        for f in range(n):
+            if f > 0:
+                pl.suppress_rendering = True
+                try:
+                    press(step_key)
+                finally:
+                    pl.suppress_rendering = False
+            if f in idx:
+                restore_cameras(); pl.render()
+                imgs.append(pl.screenshot(return_img=True)); kept.append(f)
+        pl.suppress_rendering = True
+        try:
+            press(back_key, n - 1 - f0)                # back to the frame the user was looking at
+        finally:
+            pl.suppress_rendering = False
+        restore_cameras(); pl.render()
+        times = None
+        if results_folder is not None:
+            from PynamicMesh.core.dyn_common import find_frame_times
+            ft = find_frame_times(results_folder)
+            times = ft.t[kept] if ft is not None and len(ft) == n else None
+        out = write_gif(imgs, _next_gif_path(gif_dir), frame_durations(times, len(imgs), GIF_DEFAULTS["fps"],
+                        GIF_DEFAULTS["real_time"]), GIF_DEFAULTS["max_width"], GIF_DEFAULTS["loop"])
+        if out:
+            show_notification(pl, f"{out}  ({len(imgs)} frames)", title="GIF saved")
+    capture._no_batch = True
+    pl.add_key_event('space', capture)
+    return capture
+
+
+def gif_help(gif_dir):
+    return (f"space : GIF of the sequence with the CURRENT view and settings (camera, modality, options)\n"
+            f"        -> {gif_dir}/screenshot_<n>.gif")
+
+
+def viewer_ui(pl, help_text, title="Instructions", subplot=None):
+    """
+    Uniform key handling for every viewer:
+      * VTK's single-key defaults are disabled ('e' and 'q' would close the window, 'w'/'s' switch wireframe,
+        'r' resets, 'f' flies, 'p' picks, '3' stereo ...), so the viewer's own keys ('e' edges, 's' soft
+        transport, 'c' critical points, 'p' page ...) are no longer hijacked and cannot close the window;
+      * 'q' closes, 'r' resets the camera, 'i' opens a separate small window with `help_text` (readable,
+        scrollable, Esc / Close to dismiss; the 3-D view pauses meanwhile).  Without tkinter an on-screen
+        panel is toggled instead.
+    Call it once, after the viewer's own add_key_event calls and before show().
+    """
+    try:
+        pl.iren.interactor.RemoveObservers('CharEvent')
+    except Exception:  # noqa: BLE001 - headless / unusual back-ends
+        pass
+    _batch_key_callbacks(pl)                               # one render per key press
+    dev = configure_rendering(pl)
+    state = {'help': False}
+    full_text = f"{help_text}{HELP_FOOTER}\n\nRendering device: {dev['renderer']} ({'GPU' if dev['gpu'] else 'software rasterizer - no GPU exposed to OpenGL'})"
+
+    def _sub():
+        if subplot is not None:
+            try:
+                pl.subplot(*subplot)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def show_help():
+        if show_instructions_window(title, full_text):
+            return
+        _sub()                                              # fallback: on-screen panel (toggle)
+        if state['help']:
+            pl.remove_actor('help_panel', render=False)
+        else:
+            pl.add_text(f"{title}\n{'-' * len(title)}\n{full_text}", name='help_panel', position='upper_right',
+                        font_size=10, color='white', shadow=True)
+        state['help'] = not state['help']
+        pl.render()
+
+    def reset():
+        pl.reset_camera(); pl.render()
+
+    pl.add_key_event('i', show_help)
+    pl.add_key_event('r', reset)
+    pl.add_key_event('q', pl.close)
+    _sub()
+    pl.add_text("press 'i' for the instructions", name='help_hint', position='lower_right', font_size=6, color='gray')
+
+
+def scalar_bar_args(title, n_labels=3, **extra):
+    """
+    Scalar-bar arguments with a FIXED position (vertical, right edge).  pyvista stacks every new scalar
+    bar in the next free slot, so re-adding a mesh on each frame/page made the bar climb and vanish;
+    a fixed position removes the drift.  Combine with clear_scalar_bars() before re-adding meshes.
+    """
+    args = {'title': title, 'n_labels': n_labels, 'vertical': True, 'position_x': 0.90, 'position_y': 0.20,
+            'width': 0.07, 'height': 0.55, 'title_font_size': 12, 'label_font_size': 10}
+    args.update(extra)
+    return args
+
+
+def clear_scalar_bars(pl):
+    """Removes every scalar bar of the plotter (they are separate actors that survive remove_actor)."""
+    try:
+        for t in list(pl.scalar_bars.keys()):
+            pl.remove_scalar_bar(t, render=False)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _display_mesh(obj_file):
@@ -276,7 +686,15 @@ def _edit_fm_transitions(obj_files, target_folder, source='auto'):
     plotter.add_key_event('Left', step_prev)
     plotter.add_key_event('d', delete_last)
     plotter.add_key_event('c', clear_transition)
+    fm_shot_dir = Path(target_folder) / 'Landmarks' / 'screenshots'
+    plotter.add_key_event('s', lambda: save_screenshot(plotter, fm_shot_dir, 'fm_landmarks', frame=state['trans']))
     plotter.enable_point_picking(callback=pick_callback, show_message=False, left_clicking=True)
+    fm_gif_dir = Path(target_folder) / 'Landmarks' / 'gif'
+    install_gif_capture(plotter, lambda: state['trans'], state['total'], fm_gif_dir, results_folder=target_folder)
+    viewer_ui(plotter, gif_help(fm_gif_dir) + "\n" + "Left click : pick a SOURCE vertex, then its TARGET vertex (pairs)\n"
+                       "Right / Left : next / previous transition\n  d : delete the last pair\n  c : clear the transition\n"
+                       "  s : screenshot (Results/<scene>/Landmarks/screenshots/fm_landmarks_T<transition>_<n>.png)",
+              title="Landmark editor (FM transitions)")
 
     update_transition(0)
     plotter.show(full_screen=True)
@@ -423,7 +841,7 @@ def visual_selection_edition(scene_folder_path, mood='FM', source='auto'):
             state['drawn_actors'].append(label_actor)
 
         def update_frame(frame_idx):
-            tm = mesh_mat2object(obj_files[frame_idx])
+            tm = _cached_mesh(str(obj_files[frame_idx]))
             pad = np.full((tm.faces.shape[0], 1), 3, dtype=np.int64)
             pv_faces = np.hstack((pad, tm.faces)).flatten()
             mesh_pv = pv.PolyData(tm.vertices, pv_faces)
@@ -476,7 +894,15 @@ def visual_selection_edition(scene_folder_path, mood='FM', source='auto'):
 
         plotter.add_key_event('Right', step_next)
         plotter.add_key_event('Left', step_prev)
+        sel_shot_dir = target_folder / 'Landmarks' / 'screenshots'
+        plotter.add_key_event('s', lambda: save_screenshot(plotter, sel_shot_dir, f'selection_{mood}', frame=state['frame']))
         plotter.enable_point_picking(callback=pick_callback, show_message=False, left_clicking=True)
+        sel_gif_dir = target_folder / 'Landmarks' / 'gif'
+        install_gif_capture(plotter, lambda: state['frame'], state['total'], sel_gif_dir, results_folder=target_folder)
+        viewer_ui(plotter, gif_help(sel_gif_dir) + "\n" + "Left click : pick / unpick a vertex on the current mesh\nRight / Left : next / previous frame\n"
+                           "s : screenshot (Results/<scene>/Landmarks/screenshots/selection_<mood>_T<frame>_<n>.png)\n"
+                           "The status line (bottom left) tells whether the selection is valid for the chosen mood.",
+                  title=f"Vertex selection ({mood})")
 
         update_frame(state['frame'])
         plotter.show(full_screen=True)
@@ -651,7 +1077,8 @@ def precompute_landmarks(path_str, mood='FM'):
             print(f"\n[SUCCESS] Precomputed selection lists saved to: {landmarks_file}\n")
                 
 
-def pick_single_mesh(vertices, faces, title, marker_color="blue", expected_count=None, initial_picks=None):
+def pick_single_mesh(vertices, faces, title, marker_color="blue", expected_count=None, initial_picks=None,
+                     screenshot_dir=None):
     """
     Opens a SINGLE PyVista window to pick points sequentially.
     Points are visibly numbered (1, 2, 3...).
@@ -713,6 +1140,12 @@ def pick_single_mesh(vertices, faces, title, marker_color="blue", expected_count
         redraw_labels()
 
     plotter.enable_point_picking(callback=callback, show_message=False, left_clicking=True)
+    pick_shot_dir = Path(screenshot_dir) if screenshot_dir else default_screenshot_dir("landmark_picking")
+    pick_shot_name = re.sub(r"[^A-Za-z0-9]+", "_", str(title)).strip("_") or "picking"
+    plotter.add_key_event('s', lambda: save_screenshot(plotter, pick_shot_dir, pick_shot_name))
+    viewer_ui(plotter, "Left click : pick / unpick a vertex" + (f"\nExpected number of points: {expected_count}" if expected_count else "")
+              + f"\ns : screenshot ({pick_shot_dir}/{pick_shot_name}_<n>.png)"
+              + "\nClose the window (q) when the selection is complete.", title=str(title))
 
     if picked_list:
         redraw_labels()
@@ -751,7 +1184,7 @@ PHYSICS_PAGES = [
 ]
 
 
-def launch_physics_viewer(frames_data, global_df=None, pct=(1.0, 99.0)):
+def launch_physics_viewer(frames_data, global_df=None, pct=(1.0, 99.0), screenshot_dir=None):
     """
     Multi-physics gallery. Pages are switched with the Up/Down arrow keys (or 'p'), frames with
     Left/Right. Only the fields present in the frames are shown, so legacy .npz files (6 fields)
@@ -810,19 +1243,11 @@ def launch_physics_viewer(frames_data, global_df=None, pct=(1.0, 99.0)):
                 f"\nmean speed {r.get('mean_speed', np.nan):.3g} | elastic energy {r.get('total_elastic_energy', np.nan):.3g}"
                 f"\np2p injectivity {r.get('p2p_injectivity', np.nan):.2f} | collapsed faces {r.get('collapsed_faces_fraction', np.nan):.1%}")
 
-    def clear_scalar_bars():
-        """Scalar bars are separate actors: drop them all before drawing a new page."""
-        try:
-            for title in list(pl.scalar_bars.keys()):
-                pl.remove_scalar_bar(title, render=False)
-        except Exception:  # noqa: BLE001 - older pyvista without ScalarBars API
-            pass
-
     def update_frame(frame_idx, page_changed=False):
         page_title, panels, clims = pages[state['page']]
         mesh = meshes[frame_idx]
-        if page_changed:
-            clear_scalar_bars()
+        # scalar bars are re-created with a fixed position on every update: no drift when frames / pages change
+        clear_scalar_bars(pl)
         k = 0
         for i in range(rows):
             for j in range(cols):
@@ -843,8 +1268,8 @@ def launch_physics_viewer(frames_data, global_df=None, pct=(1.0, 99.0)):
                                 + global_text(frame_idx), name=title_name, font_size=8, position='upper_left')
                 else:
                     pl.add_mesh(mesh, scalars=pv_field_name(key), cmap=cmap, clim=clims[key], name=mesh_name,
-                                scalar_bar_args={'title': pv_field_name(key), 'n_labels': 3}, render=False)
-                    pl.add_text(title, name=title_name, font_size=10, position='upper_left')
+                                scalar_bar_args=scalar_bar_args(pv_field_name(key)), render=False)
+                    pl.add_text(f"{title}\nFrame {frame_idx + 1}/{state['total']}", name=title_name, font_size=9, position='upper_left')
                 k += 1
 
     update_frame(0)
@@ -881,10 +1306,18 @@ def launch_physics_viewer(frames_data, global_df=None, pct=(1.0, 99.0)):
     pl.add_key_event('Up', next_page)
     pl.add_key_event('Down', prev_page)
     pl.add_key_event('p', next_page)
+    phys_shot_dir = Path(screenshot_dir) if screenshot_dir else default_screenshot_dir("physics")
+    pl.add_key_event('s', lambda: save_screenshot(pl, phys_shot_dir, f"physics_page{state['page'] + 1}", frame=state['frame']))
 
     pl.subplot(rows - 1, 0)
-    pl.add_text("Controls:\n  Right/Left : next / previous frame\n  Up/Down or p : switch quantity page",
+    pl.add_text("Controls:\n  Right/Left : next / previous frame\n  Up/Down or p : switch quantity page\n  s : screenshot\n  i : instructions",
                 position='lower_left', font_size=6, color='black', name='controls')
+    phys_gif_dir = (phys_shot_dir.parent if phys_shot_dir.name == 'screenshots' else phys_shot_dir) / 'gif'
+    install_gif_capture(pl, lambda: state['frame'], state['total'], phys_gif_dir, results_folder=phys_gif_dir)
+    viewer_ui(pl, gif_help(phys_gif_dir) + "\n" + "Right / Left : next / previous frame\nUp / Down or p : switch the quantity page\n"
+                  f"s : screenshot ({phys_shot_dir}/physics_page<p>_T<frame>_<n>.png)\n"
+                  "Mouse wheel / right drag : zoom, left drag : rotate (all panels are linked)\n"
+                  f"Pages: {', '.join(p[0] for p in pages)}", title="Multi-physics gallery", subplot=(0, cols - 1))
     pl.show(full_screen=True)
 
 
@@ -924,7 +1357,7 @@ def visualize_physics(mesh_folder_path, matrix_folder_path, on_time=True):
     if csv_path.exists():
         global_df = pd.read_csv(csv_path)
 
-    launch_physics_viewer(frames_data, global_df=global_df)
+    launch_physics_viewer(frames_data, global_df=global_df, screenshot_dir=output_folder / 'screenshots')
 
 ##################################################################################################################### Reeb Graphs #########################################################################################################################################
 
@@ -997,7 +1430,7 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
         return node_data
 
     def update_frame(frame_idx):
-        tm = mesh_mat2object(obj_files[frame_idx]) 
+        tm = _cached_mesh(str(obj_files[frame_idx])) 
         pad = np.full((tm.faces.shape[0], 1), 3, dtype=np.int64)
         pv_faces = np.hstack((pad, tm.faces)).flatten()
         mesh_pv = pv.PolyData(tm.vertices, pv_faces)
@@ -1093,9 +1526,9 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
             "  - [ESC] Normal: Click node to CONNECT/DELETE.\n"
             "  - [C] Link Mode: Click 2 existing nodes to connect them.\n"
             "  - [D] Edge Delete: Click an edge to remove it.\n"
-            "  - [I] Inner Mode: Click node to push it inside mesh (adaptive step).\n"
+            "  - [N] Inner Mode: Click node to push it inside mesh (adaptive step).\n"
             "  - [O] Outer Mode: Click node to pull it outside (adaptive step).\n"
-            "SPACE BAR to UNDO action.\n"
+            "SPACE BAR to UNDO action.   [I] instructions panel.\n"
         )
         plotter.add_text(instruction_text, name='t2', font_size=8, position='upper_left')
 
@@ -1256,13 +1689,14 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
 
     plotter.add_key_event('Right', lambda: set_mode('normal') or step_next())
     plotter.add_key_event('Left', lambda: set_mode('normal') or step_prev())
-    plotter.add_key_event('space', undo_action)
+    plotter.add_key_event('u', undo_action)                 # (space records a GIF in every viewer)
     plotter.add_key_event('Escape', clear_selection)
 
     plotter.add_key_event('c', lambda: set_mode('link'))
-    plotter.add_key_event('i', lambda: set_mode('inner'))
+    plotter.add_key_event('n', lambda: set_mode('inner'))       # was 'i' (now the instructions key)
     plotter.add_key_event('o', lambda: set_mode('outer'))
     plotter.add_key_event('d', lambda: set_mode('edge_delete'))
+    plotter.add_key_event('s', lambda: save_screenshot(plotter, target_folder / 'screenshots', 'reeb_edit', frame=state['frame']))
     
     def step_next():
         if state['frame'] < state['total'] - 1:
@@ -1287,6 +1721,13 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
     plotter.camera_position = 'iso'
     
     plotter.link_views() 
+    edit_gif_dir = target_folder / 'gif'
+    install_gif_capture(plotter, lambda: state['frame'], state['total'], edit_gif_dir, results_folder=target_folder)
+    viewer_ui(plotter, gif_help(edit_gif_dir) + "\n" + "Left click : select a node (then a second node to link with 'c' mode)\n"
+                       "c : link mode | n : inner-node mode | o : outer-node mode | d : delete-edge mode\n"
+                       "u : undo | Escape : clear the selection | Right / Left : next / previous frame (normal mode)\n"
+                       "s : screenshot (Results/<scene>/Reeb_graph_manual_trim/screenshots/reeb_edit_T<frame>_<n>.png)",
+              title="Reeb graph editor", subplot=(0, 1))
     plotter.show(full_screen=True)
     
     print("\nClosing editor panel...")
@@ -1320,7 +1761,7 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files, graph='reeb'):
     pl.camera_position = 'iso'
     
     def update_frame(frame_idx):
-        tm = mesh_mat2object(mesh_files[frame_idx])
+        tm = _cached_mesh(str(mesh_files[frame_idx]))
 
         faces_pv = np.empty((tm.faces.shape[0], 4), dtype=int)
         faces_pv[:, 0] = 3
@@ -1355,7 +1796,10 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files, graph='reeb'):
             pts[ok] = np.asarray(meshn.points)[vidx[ok]]
             pts[~ok] = np.asarray(meshn.points).mean(axis=0)
             reeb_pv.points = pts
-            reeb_pv.point_data['type_code'] = np.array([{'minimum': 0, 'saddle': 1, 'maximum': 2}.get(str(d.get('type', '')), 3) for _, d in nodes])
+            # 0 min, 1 saddle, 2 max (MS field), 3 centre, 4 max found by the convex hull only, 5 max found by both
+            reeb_pv.point_data['type_code'] = np.array([
+                {'hull': 4, 'ms+hull': 5}.get(str(d.get('source', '')), 2) if str(d.get('type', '')) == 'maximum'
+                else {'minimum': 0, 'saddle': 1}.get(str(d.get('type', '')), 3) for _, d in nodes])
         
         pl.subplot(0, 0)
         pl.add_mesh(meshn, scalars='Dynamic_Scalar', cmap='viridis', name='z_mesh', 
@@ -1372,7 +1816,7 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files, graph='reeb'):
             if graph == 'mscomplex':
                 # colour by critical point type (red max, blue min, green saddle, gold centre)
                 import matplotlib.colors as mc
-                type_cols = np.array([mc.to_rgb(c) for c in ('royalblue', 'limegreen', 'red', 'gold')])
+                type_cols = np.array([mc.to_rgb(c) for c in ('royalblue', 'limegreen', 'red', 'gold', 'deepskyblue', 'darkviolet')])
                 rep = spheres.n_points // max(reeb_pv.n_points, 1)
                 cols = type_cols[reeb_pv.point_data['type_code']]
                 spheres.point_data['rgb'] = (np.repeat(cols, rep, axis=0)[:spheres.n_points] * 255).astype(np.uint8)
@@ -1414,10 +1858,20 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files, graph='reeb'):
             
     pl.add_key_event('Right', step_next)   
     pl.add_key_event('Left', step_prev)    
+    graph_shot_dir = Path(reeb_files[0]).parent / 'screenshots' if len(reeb_files) else default_screenshot_dir("graphs")
+    graph_shot_name = "reeb_graph" if graph == 'reeb' else "ms_graph"
+    pl.add_key_event('s', lambda: save_screenshot(pl, graph_shot_dir, graph_shot_name, frame=state['frame']))
     
     pl.subplot(0, 0)
-    pl.add_text("Time Control:\n  right arrow key : Next Mesh\n   left arrow key : Prev Mesh", 
+    pl.add_text("Time Control:\n  right arrow key : Next Mesh\n   left arrow key : Prev Mesh\n  s : screenshot\n  i : instructions", 
                 position='lower_left', font_size=6, color='black')
+    graph_gif_dir = (Path(reeb_files[0]).parent.parent / 'gif' if graph != 'reeb' else Path(reeb_files[0]).parent / 'gif') if len(reeb_files) else default_screenshot_dir('graphs')
+    install_gif_capture(pl, lambda: state['frame'], len(mesh_files), graph_gif_dir, results_folder=graph_gif_dir)
+    viewer_ui(pl, gif_help(graph_gif_dir) + "\n" + "Right / Left : next / previous mesh\nLeft panel: scalar field on the mesh; right panel: the graph "
+                  "(nodes coloured by type)\nMorse-Smale graphs: maxima red = MS field only, blue = convex hull only, "
+                  "violet = both; blue min, green saddle, gold centre\nMouse: left drag rotate, wheel zoom (views are linked)\n"
+                  f"s : screenshot (<graph folder>/screenshots/{graph_shot_name}_T<frame>_<n>.png)",
+              title=f"{graph} graph viewer", subplot=(0, 1))
     pl.show(full_screen=True)
 
 def visualize_graphs(mesh_folder_path, graph_folder_path, graph='reeb'):
@@ -1480,29 +1934,42 @@ def visualize_reeb_graphs(mesh_folder_path, reeb_folder_path):
     return visualize_graphs(mesh_folder_path, reeb_folder_path, graph='reeb')
 
 
+def trimesh_to_polydata(tm):
+    """pyvista PolyData of a pyFM TriMesh (or any object with .vertices / .faces): pyvista cannot wrap a TriMesh
+    directly ('Unable to wrap TriMesh into a pyvista type'), it needs the padded VTK face array [3, i, j, k, ...]."""
+    faces = np.asarray(tm.faces, dtype=np.int64)
+    padded = np.empty((faces.shape[0], 4), dtype=np.int64)
+    padded[:, 0] = 3
+    padded[:, 1:] = faces
+    return pv.PolyData(np.asarray(tm.vertices, dtype=np.float64), padded.ravel())
+
+
 def visualize_obj_sequence(folder_path: str):
-    """Dynamically loads and visualizes a sequence of .obj meshes."""
+    """Dynamically loads and visualizes a sequence of .obj / .mat meshes, in the same (aligned) orientation as the
+    other viewers and the pipeline (tools.load_aligned_mesh)."""
     path = Path(folder_path)
     if not path.exists() or not path.is_dir():
         print(f"Error: The path '{folder_path}' is not a valid directory.")
         return
 
-    obj_files = sorted([f for f in path.iterdir() if f.is_file() and f.suffix == '.obj'], key=natural_sort_key)
+    obj_files = sorted([f for f in path.iterdir() if f.is_file() and f.suffix in ('.obj', '.mat')], key=natural_sort_key)
     
     if not obj_files:
-        print(f"No .obj files found in {path}")
+        print(f"No .obj / .mat files found in {path}")
         return
 
     pl = pv.Plotter(title="Sequential Mesh Visualizer")
-    state = {'frame': 0, 'total': len(obj_files)}
+    state = {'frame': 0, 'total': len(obj_files), 'camera_set': False}
     
     def update_frame(idx):
         pl.clear_actors()
-        mesh = pv.read(obj_files[idx])
+        mesh = trimesh_to_polydata(load_aligned_mesh(obj_files[idx]))   # same orientation as the other viewers
         pl.add_mesh(mesh, color='white', show_edges=True, edge_color="green")
+        if not state['camera_set']:                    # iso view as the other viewers, kept while stepping
+            pl.camera_position = 'iso'; pl.reset_camera(); state['camera_set'] = True
         pl.add_text(f"Frame {idx + 1}/{state['total']}\nFile: {obj_files[idx].name}", 
                     position='upper_left', name='label', font_size=10)
-        pl.add_text("Time Control:\n  Right Arrow : Next\n  Left Arrow : Prev", 
+        pl.add_text("Time Control:\n  Right Arrow : Next\n  Left Arrow : Prev\n  s : screenshot", 
                     position='lower_left', font_size=8, color='black') 
         
     def step_next():
@@ -1517,6 +1984,12 @@ def visualize_obj_sequence(folder_path: str):
 
     pl.add_key_event('Right', step_next) 
     pl.add_key_event('Left', step_prev) 
+    seq_shot_dir = default_screenshot_dir(path.name)
+    pl.add_key_event('s', lambda: save_screenshot(pl, seq_shot_dir, "mesh", frame=state['frame']))
+    seq_gif_dir = (path.parent.parent / "Results" / path.name / "Basic_Geometry" / "gif") if (path.parent.parent / "Results" / path.name).is_dir() else seq_shot_dir / "gif"
+    install_gif_capture(pl, lambda: state['frame'], state['total'], seq_gif_dir, results_folder=seq_gif_dir)
+    viewer_ui(pl, gif_help(seq_gif_dir) + "\n" + "Right / Left : next / previous mesh of the sequence\n"
+                  f"s : screenshot ({seq_shot_dir}/mesh_T<frame>_<n>.png)", title="Mesh sequence")
     
     update_frame(0)
     pl.show(full_screen=True)
@@ -1530,6 +2003,8 @@ MS_PALETTE = np.array([[0.12, 0.47, 0.71], [1.00, 0.50, 0.05], [0.17, 0.63, 0.17
                        [0.99, 0.71, 0.38], [0.70, 0.87, 0.41], [0.99, 0.80, 0.90], [0.85, 0.85, 0.85], [0.74, 0.50, 0.74],
                        [0.80, 0.92, 0.77], [1.00, 0.93, 0.44]])
 MS_CP_COLORS = {"maximum": "red", "minimum": "royalblue", "saddle": "limegreen", "regular": "lightgrey", "lost": "black", "center": "gold"}
+# protrusion detection source (MS maxima fused with the convex-hull depth minima, SMComplex.fuse_hull_protrusions)
+MS_SOURCE_COLORS = {"ms": "red", "hull": "deepskyblue", "ms+hull": "darkviolet"}
 
 
 def _ms_rot(pd_):
@@ -1593,11 +2068,19 @@ def launch_ms_viewer(mesh_files, ms_files, tracking_dir=None, lineage_csv=None):
                                          (hard p2p or soft spectral transport), current boundaries on top
                        'fates'         : current mesh with the images of the previous critical points
                                          coloured by their fate (kept type / became saddle / minimum / regular)
+                       'protrusions'   : left = protrusion cores (region colours) vs cell body (grey), tips
+                                         coloured by detection source (red MS field only, blue convex hull only,
+                                         violet both); right = depth below the convex hull with the hull overlay
       s              : hard <-> soft transport (correspondence mode)
-      b / c / e      : toggle boundaries / critical points / mesh edges
+      h              : show / hide the convex hull (protrusions mode)
+      t / y          : convex hull more transparent / more opaque (protrusions mode)
+      z / o          : critical-point spheres bigger / smaller (all modes)
+      g              : maxima only (hide saddles and minima: a red tip and the green saddle of its pass can be
+                       close together on small protrusions)
+      b / c / e      : toggle boundaries / critical points (tips) / mesh edges
     Region colours are stable along a protrusion track when region_lineage.csv is available.
     """
-    from PynamicMesh.core.SMComplex import MSComplex, create_ms_polydata, CP_TYPES
+    from PynamicMesh.core.SMComplex import MSComplex, create_ms_polydata, create_hull_polydata, CP_TYPES
     print("\nStarting interactive Morse–Smale viewer...")
     n = len(mesh_files)
     tracking_dir = Path(tracking_dir) if tracking_dir else None
@@ -1611,13 +2094,16 @@ def launch_ms_viewer(mesh_files, ms_files, tracking_dir=None, lineage_csv=None):
             if r.prev_max_vertex >= 0:
                 color_key[(int(r.Time_Step) - 1, int(r.prev_max_vertex))] = int(r.track_id)
     cache = {}
+    raw = {}                    # frame -> (vertices, faces) of the loaded mesh (for the convex hull)
+    hull_cache = {}
     ms_all = [MSComplex.from_pickle(f) for f in ms_files]
     n_colors = max([len(ms.maxima) for ms in ms_all] + [max(color_key.values(), default=0) + 1, 32])
     palette = _ms_palette(n_colors)
 
     def load(i):
         if i not in cache:
-            tm = mesh_mat2object(mesh_files[i])
+            tm = _cached_mesh(str(mesh_files[i]))
+            raw[i] = (np.asarray(tm.vertices), np.asarray(tm.faces))
             ms = ms_all[i]
             mesh, bnd, _ = create_ms_polydata(ms, tm.vertices, tm.faces)
             _ms_rot(mesh); _ms_rot(bnd)
@@ -1630,14 +2116,28 @@ def launch_ms_viewer(mesh_files, ms_files, tracking_dir=None, lineage_csv=None):
             cache[i] = (ms, mesh, bnd, cps)
         return cache[i]
 
+    def load_hull(i):
+        if i not in hull_cache:
+            load(i)
+            try:
+                h = create_hull_polydata(ms_all[i], *raw[i])
+                hull_cache[i] = _ms_rot(h) if h.n_points else h
+            except Exception:  # noqa: BLE001
+                hull_cache[i] = pv.PolyData()
+        return hull_cache[i]
+
     def key_for(frame, ms):
         """region id -> colour index: the track id when known, else the rank of the maximum in the frame."""
         return {int(m): color_key.get((frame, int(m)), k) for k, m in enumerate(ms.maxima)}
 
     pl = pv.Plotter(shape=(1, 2))
     pl.title = "Morse–Smale complex: protrusion segmentation and correspondence"
-    modes = ["segmentation", "correspondence", "fates"]
-    state = {"frame": 0, "mode": 0, "soft": False, "bnd": True, "cps": True, "edges": False}
+    modes = ["segmentation", "correspondence", "fates", "protrusions"]
+    state = {"frame": 0, "mode": 0, "soft": False, "bnd": True, "cps": True, "edges": False, "hull": True, "maxonly": False,
+             "cp_scale": 1.0,          # 'z' / 'o': multiplier of the critical-point sphere radius
+             "hull_opacity": 0.18}     # 't' / 'y': opacity of the convex hull (protrusions mode)
+    CP_SCALE_STEP, CP_SCALE_RANGE = 1.25, (0.1, 10.0)
+    HULL_OPACITY_STEP = 0.05
     pl.add_axes()
 
     def draw_mesh(sub, mesh, colors, name, opacity=1.0):
@@ -1654,8 +2154,15 @@ def launch_ms_viewer(mesh_files, ms_files, tracking_dir=None, lineage_csv=None):
             pl.add_mesh(bnd.tube(radius=radius), color=color, name=name, render=False)
 
     def draw_cps(sub, cps, name, radius, colors=None):
+        radius = radius * state["cp_scale"]
         pl.subplot(0, sub)
         pl.remove_actor(name)
+        if state["cps"] and cps.n_points > 0 and colors is None and state["maxonly"]:
+            keep = np.asarray(cps.point_data["type_code"]) == CP_TYPES.index("maximum")     # 'g': tips only
+            sub_pts = pv.PolyData(np.asarray(cps.points)[keep]) if keep.any() else pv.PolyData()
+            if sub_pts.n_points:
+                sub_pts.point_data["type_code"] = np.asarray(cps.point_data["type_code"])[keep]
+            cps = sub_pts
         if state["cps"] and cps.n_points > 0:
             sph = cps.glyph(geom=pv.Sphere(radius=radius), scale=False, orient=False)
             if colors is None:
@@ -1674,14 +2181,60 @@ def launch_ms_viewer(mesh_files, ms_files, tracking_dir=None, lineage_csv=None):
     def clear_all():
         for sub in (0, 1):
             pl.subplot(0, sub)
-            for nm in ("mesh", "bnd", "cps", "bnd2", "cps2", "txt", "legend"):
-                pl.remove_actor(nm)
-            try:
-                pl.remove_scalar_bar()
-            except Exception:
-                pass
+            for nm in ("mesh", "bnd", "cps", "bnd2", "cps2", "txt", "legend", "hull"):
+                pl.remove_actor(nm, render=False)
+        clear_scalar_bars(pl)
+
+    def draw_protrusions(i, ms, mesh, bnd, col_c, r_node, r_edge):
+        """'protrusions' modality: cores vs body + tips by detection source | hull depth + convex hull."""
+        pr = getattr(ms, "protrusions", None)
+        core = getattr(ms, "core_label", None)
+        if pr is None or core is None or "hull_depth" not in mesh.point_data:
+            draw_mesh(0, mesh, col_c, "mesh")
+            draw_boundary(0, bnd, "bnd", radius=r_edge)
+            pl.subplot(0, 0)
+            pl.add_text(f"Frame {i + 1}/{n}: no convex-hull protrusion results in this complex\n"
+                        "(recompute with ms_protrusion_params={'enabled': True})", name="txt", font_size=9, position="upper_left")
+            return
+        is_core = (np.asarray(core) >= 0)[:, None]
+        draw_mesh(0, mesh, np.where(is_core, col_c, 0.86), "mesh")
+        draw_boundary(0, bnd, "bnd", radius=r_edge)
+        ids = pr.protrusion_id.to_numpy(dtype=np.int64)
+        tips = pv.PolyData(mesh.points[ids]) if len(ids) else pv.PolyData()
+        cols = np.array([matplotlib_color(MS_SOURCE_COLORS.get(str(sr), "black")) for sr in pr.source]) if len(ids) else None
+        if tips.n_points:
+            tips.point_data["type_code"] = np.zeros(tips.n_points, dtype=int)
+            draw_cps(0, tips, "cps", r_node * 1.3, colors=cols)
+        cnt = pr.source.value_counts().to_dict()
+        pl.subplot(0, 0)
+        pl.add_text(f"Protrusions - Frame {i + 1}/{n}: {len(pr)} total | MS field only {cnt.get('ms', 0)} (red)  "
+                    f"hull only {cnt.get('hull', 0)} (blue)  both {cnt.get('ms+hull', 0)} (violet)\n"
+                    f"cores {100 * float(pr.core_area_rel.sum()):.1f}% of the surface (grey = cell body) | temporal support "
+                    f"{int(pr.temporal_support.sum())} | beta_eff {ms.meta.get('beta_effective', np.nan):.3f}  "
+                    f"noise {ms.meta.get('noise_level_rel', np.nan):.3f}",
+                    name="txt", font_size=9, position="upper_left")
+        pl.subplot(0, 1)
+        pl.add_mesh(mesh.copy(), scalars="hull_depth", cmap="magma_r", name="mesh", smooth_shading=True,
+                    show_edges=state["edges"], scalar_bar_args=scalar_bar_args("depth below the convex hull"), render=False)
+        if state["hull"]:
+            hull = load_hull(i)
+            if hull.n_points:
+                pl.add_mesh(hull, color="lightsteelblue", opacity=state["hull_opacity"], show_edges=True, edge_color="steelblue",
+                            line_width=0.5, name="hull", render=False)
+        if tips.n_points:
+            draw_cps(1, tips, "cps2", r_node * 1.3, colors=cols)
+        pl.add_text("Depth below the convex hull (Huang et al. 2024): protrusion tips are its minima\n"
+                    "h: hull on/off | t / y: hull more transparent / opaque | c: tips | z / o: tips bigger / smaller | "
+                    "b: boundaries", name="txt", font_size=9, position="upper_left")
+
+    def show_status():
+        """Current sphere scale and hull opacity (feedback for z / o / t / y), left panel, lower right."""
+        pl.subplot(0, 0)
+        pl.add_text(f"spheres x{state['cp_scale']:.2f} (z / o)   hull opacity {state['hull_opacity']:.2f} (t / y)",
+                    name="status", position="lower_right", font_size=7, color="dimgray")
 
     def update(i):
+        show_status()
         clear_all()
         ms, mesh, bnd, cps = load(i)
         diag = np.linalg.norm(np.array(mesh.bounds[1::2]) - np.array(mesh.bounds[::2]))
@@ -1690,6 +2243,9 @@ def launch_ms_viewer(mesh_files, ms_files, tracking_dir=None, lineage_csv=None):
         key_c = key_for(i, ms)
         col_c = _ms_region_colors(ms.label_max, key_c, palette, ms.boundary_edges)
         c = ms.counts()
+        if mode == "protrusions":
+            draw_protrusions(i, ms, mesh, bnd, col_c, r_node, r_edge)
+            return
         if mode == "segmentation" or i == 0:
             draw_mesh(0, mesh, col_c, "mesh")
             draw_boundary(0, bnd, "bnd", radius=r_edge)
@@ -1702,7 +2258,7 @@ def launch_ms_viewer(mesh_files, ms_files, tracking_dir=None, lineage_csv=None):
             pl.subplot(0, 1)
             m2 = mesh.copy()
             pl.add_mesh(m2, scalars="scalar", cmap="viridis", name="mesh", smooth_shading=True, show_edges=state["edges"],
-                        scalar_bar_args={"title": ms.meta.get("scalar_method", "f")}, render=False)
+                        scalar_bar_args=scalar_bar_args(ms.meta.get("scalar_method", "f")), render=False)
             draw_boundary(1, bnd, "bnd2", color="white", radius=r_edge)
             draw_cps(1, cps, "cps2", r_node)
             pl.add_text("Scalar field of the complex", name="txt", font_size=9, position="upper_left")
@@ -1740,7 +2296,9 @@ def launch_ms_viewer(mesh_files, ms_files, tracking_dir=None, lineage_csv=None):
                         f"({'soft spectral transport' if use_soft else 'hard p2p transport'})\n"
                         f"matched {len(data['match_prev'])}/{len(data['prev_ids'])} regions, mean IoU "
                         f"{np.mean([iou[np.where(data['prev_ids'] == a)[0][0], np.where(data['curr_ids'] == b)[0][0]] for a, b in zip(data['match_prev'], data['match_curr'])]) if len(data['match_prev']) else 0:.2f}"
-                        f"\nyellow = current boundaries; colours = previous regions (s: hard/soft)",
+                        + (f"  | size-adaptive matching, map error {float(data['map_error']):.3f} sqrt(area), "
+                           f"{int(np.sum(data['match_kind'] == 'tip'))} tip matches" if ("map_error" in data.files and bool(data["adaptive"])) else "")
+                        + f"\nyellow = current boundaries; colours = previous regions (s: hard/soft)",
                         name="txt", font_size=9, position="upper_left")
         else:  # fates
             draw_mesh(1, mesh, 0.55 * col_c + 0.45, "mesh")
@@ -1774,7 +2332,30 @@ def launch_ms_viewer(mesh_files, ms_files, tracking_dir=None, lineage_csv=None):
             update(state["frame"]); pl.render()
         return _f
 
-    for k_ in ("b", "c", "e", "m", "s"):          # drop pyvista's defaults on these keys
+    def scale_spheres(factor):
+        def _f():
+            state["cp_scale"] = float(np.clip(state["cp_scale"] * factor, *CP_SCALE_RANGE))
+            update(state["frame"]); pl.render()
+        return _f
+
+    def hull_opacity(delta):
+        def _f():
+            state["hull_opacity"] = float(np.clip(round(state["hull_opacity"] + delta, 3), 0.0, 1.0))
+            show_status()
+            actor = None
+            try:                                      # change the drawn hull in place (no redraw of the frame)
+                pl.subplot(0, 1)
+                actor = pl.renderer.actors.get("hull")
+            except Exception:  # noqa: BLE001
+                actor = None
+            if actor is not None:
+                actor.GetProperty().SetOpacity(state["hull_opacity"])
+            elif modes[state["mode"]] == "protrusions" and state["hull"]:
+                update(state["frame"])
+            pl.render()
+        return _f
+
+    for k_ in ("b", "c", "e", "m", "s", "h", "g", "z", "o", "t", "y", "p"):  # drop pyvista's defaults on these keys
         try:
             pl.clear_events_for_key(k_)
         except Exception:
@@ -1786,11 +2367,31 @@ def launch_ms_viewer(mesh_files, ms_files, tracking_dir=None, lineage_csv=None):
     pl.add_key_event("b", toggle("bnd"))
     pl.add_key_event("c", toggle("cps"))
     pl.add_key_event("e", toggle("edges"))
+    pl.add_key_event("h", toggle("hull"))
+    pl.add_key_event("g", toggle("maxonly"))
+    pl.add_key_event("z", scale_spheres(CP_SCALE_STEP))            # bigger spheres
+    pl.add_key_event("o", scale_spheres(1.0 / CP_SCALE_STEP))      # smaller spheres
+    pl.add_key_event("t", hull_opacity(-HULL_OPACITY_STEP))        # hull more transparent
+    pl.add_key_event("y", hull_opacity(+HULL_OPACITY_STEP))        # hull more opaque
+    ms_shot_dir = Path(ms_files[0]).parent.parent / "screenshots" if ms_files else default_screenshot_dir("ms_complex")
+    pl.add_key_event("p", lambda: save_screenshot(pl, ms_shot_dir, f"ms_{modes[state['mode']]}", frame=state['frame']))
     update(0)
     pl.subplot(0, 0); pl.reset_camera(); pl.subplot(0, 1); pl.reset_camera(); pl.link_views()
     pl.subplot(0, 0)
-    pl.add_text("Controls: Right/Left frame | m modality (segmentation / correspondence / fates) | s hard-soft transport | b boundaries | c critical points | e edges",
+    pl.add_text("Controls: Right/Left frame | m modality (segmentation / correspondence / fates / protrusions) | s hard-soft transport | h hull | t/y hull transparency | b boundaries | c critical points | z/o sphere size | g maxima only | e edges | p screenshot | i instructions",
                 position="lower_left", font_size=6, color="black")
+    ms_gif_dir = Path(ms_files[0]).parent.parent / "gif" if ms_files else default_screenshot_dir("ms_complex")
+    install_gif_capture(pl, lambda: state["frame"], len(ms_files), ms_gif_dir, results_folder=ms_gif_dir)
+    viewer_ui(pl, gif_help(ms_gif_dir) + "\n" + "Right / Left : next / previous frame\nm : modality (segmentation -> FM region correspondence -> critical-point fates\n"
+                  "    -> protrusions: cores vs body, tips by source red MS / blue hull / violet both, hull depth + convex hull)\n"
+                  "s : hard p2p / soft spectral transport | h : convex hull on/off | b : region boundaries | c : critical points\n"
+                  "g : maxima only (red = protrusion tip, green = saddle = pass between two protrusions) | e : mesh edges\n"
+                  "z / o : critical-point spheres bigger / smaller (x1.25 per press, all modes, kept between frames)\n"
+                  "t / y : convex hull more transparent / more opaque (steps of 0.05, protrusions mode, kept between frames)\n"
+                  "        current values are shown at the bottom right of the left panel\n"
+                  "p : screenshot (MSComplexAnalysis/screenshots/ms_<modality>_T<frame>_<n>.png; 's' stays the hard / soft transport)\n"
+                  "(the previous VTK shortcuts on e/s/c/w/f/p are disabled so these keys never close the window)",
+              title="Morse-Smale viewer", subplot=(0, 1))
     pl.show(full_screen=True)
 
 

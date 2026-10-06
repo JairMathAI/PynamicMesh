@@ -1,6 +1,26 @@
 # Root of the scene folder container
 Data:
   path_str: './Mesh_models'
+  devices: 'all'                      # GPUs: 'all' | 'cpu' | '0,1' (command line: --devices)
+  workers: null                       # worker processes (null = CPU cores - 1, at most 8)
+  parallel_scenes: 'auto'
+  compare_scenes: 'auto'              # comparison of the scenes (Results/_comparison)            # several scenes at once, one per GPU: 'auto' (>1 GPU and >1 scene) | True | False
+
+# Sections written here at the top level are DEFAULTS for every scene (a scene section with the same name overrides
+# them key by key): convenient for the GIF and time settings shared by all the scenes.
+GIF:
+  gif: True
+  gif_params: {fps: 6, real_time: True, max_frames: 240}
+Reeb_Dynamics:                        # shared by every scene (needs trajectories in the scene)
+  compute_reeb_dynamics: True
+  reeb_dynamics_params: {persistence: 0.08, substeps: 4}
+Motion_Analysis:                      # shared by every scene (needs trajectories in the scene)
+  compute_motion_analysis: True
+  motion_params: {ftle_window: 3, dmd_forecast: 3}
+Frame_Times:
+  frame_interval: null
+  time_unit: 's'
+  auto_detect: True                   # every scene folder may carry its own frame_times.csv
 
 ################################################################### Individual params for each scene on the folder ####################################################################################################
 # scene1: automatic landmarks + orientation term + extrinsic descriptors (recommended for shapes with bilateral symmetry)
@@ -55,6 +75,36 @@ scene1:
       iou_threshold: 0.25
       dominance: 0.5
       ghost_horizon: 6
+      adaptive: True
+    ms_protrusion_params:
+      enabled: True
+      beta: 0.012
+      temporal: True
+
+  Parametrization:
+    compute_parametrization: True
+    param_params: {sphere_method: 'conformal', area_weight: 0.7, L_max: 25, mh_modes: 80, plots: True,
+                   high_degree: True, hd_lmax: 128}           # walking animal: legs need a high degree
+
+  Trajectories:
+    compute_trajectories: True
+    traj_params:
+      trajectory_method: 'arap_tracking'
+      rigidity_params: {enabled: True, mode: 'arap'}     # walking animal: near-isometric motion
+      schemes: ['hermite_catmull_rom', 'natural_cubic', 'arap_polar']
+      substeps: 4
+
+  Graph_Animation:
+    compute_graph_animation: True
+    graph_animation_params: {graphs: ['reeb', 'mscomplex'], frame: 0, model: ['arap_polar', 'natural_cubic']}
+
+  Dynamic_Analysis:
+    compute_dynamic_analysis: True
+    dyn_analysis_params: {hodge: True, ftle: True, shape_space: True, change_points: True, homology: False,
+                          shape_source: 'auto', spherical_spectra: True}
+
+  Frame_Times:                        # this scene: one frame every 0.5 s (overrides the shared Frame_Times)
+    frame_interval: 0.5
 
 # scene2: precomputed (manually selected) landmarks only; FM options written flat (equivalent to nesting them in fm_params)
 scene2:
@@ -97,6 +147,15 @@ scene2:
     fate_radius: 0.05
     growth_tolerance: 0.003
 
+  Trajectories:                       # parameters written flat (equivalent to traj_params)
+    compute_trajectories: True
+    trajectory_method: 'arap_tracking'
+    rigidity_params: {enabled: True, mode: 'asap'}       # growing cells: as-similar-as-possible
+    schemes: ['hermite_catmull_rom', 'arap_polar']
+
+  Dynamic_Analysis:
+    compute_dynamic_analysis: True
+
 # scene3: no landmarks, symmetry-aware descriptors only (XYZ requested explicitly in the descriptor string)
 scene3:
   Basic_Geometry:
@@ -130,3 +189,7 @@ scene3:
 
   MS_Complex:                         # Morse–Smale analysis switched off for this scene
     compute_mscomplex: False
+
+  GIF:                                # no GIFs for this scene (overrides the shared GIF section)
+    gif: False
+  # no Parametrization / Trajectories / Graph_Animation / Dynamic_Analysis sections: those stages stay off

@@ -1,5 +1,9 @@
 Data:
   path_str: './Mesh_models'
+  devices: 'all'                      # GPUs: 'all' | 'cpu' | '0,1' (command line: --devices)
+  workers: null                       # worker processes for the per-frame work (null = CPU cores - 1, at most 8)
+  parallel_scenes: 'auto'
+  compare_scenes: 'auto'              # comparison of the scenes (Results/_comparison): 'auto' (>= 2 scenes) | False            # several scenes at once, one per GPU: 'auto' (>1 GPU and >1 scene) | True | False
 
 
 Basic_Geometry:
@@ -43,7 +47,9 @@ Functional_Map:
       w_lap: 0.001
       w_dcomm: 1.0
       w_orient: 1.0                   # only used when symmetry_mode includes 'orientation'
-    refine: 'auto'                    # 'auto' (ZoomOut) | 'icp' | [nit, step]
+    refine: 'auto'                    # 'auto' (ZoomOut) | 'icp' | [nit, step] | 'zoomout_auto' (ZoomOut to zoomout_k_final for every pair)
+    zoomout_k_final: 100              # 'zoomout_auto': final map size
+    zoomout_subsample: 'auto'         # 'zoomout_auto': subsampled refinement for large / mismatched pairs
     dt: 1.0                           # time step for velocity / acceleration fields
     verbose: False
 
@@ -52,14 +58,17 @@ Reeb_Graph:
   time_graph_analysis: True
   reeb_scalar: 'geodesic'
   bins: 30
+  reeb_topology_control: True        # + complementary controlled graphs (Reeb_Graphs/Topology_Controlled); main graphs unchanged
   scalar_args:
-    vertex_ref_index: [4896]          # index, list of indices, 'mass_center' or 'precomputed'
+    vertex_ref_index: [4896]          # index, list, 'mass_center', 'precomputed', or automatic: 'auto' | 'auto_center' | 'auto_extremity'
     geodesic_solver: 'heat'           # 'heat' | 'dijkstra'
+    reference_transport: 'auto'       # automatic references between frames: 'auto' | 'map' | 'position'
     equalize_histogram: False         # True -> rank-normalized field (equally populated bins)
 
 Graph_similarity:
     graph_sim: True
     graph_metrics: all
+    analysis_graphs: ['reeb', 'mscomplex']   # graphs of the time analysis / similarity: 'reeb' | 'reeb_controlled' | 'mscomplex'
 MS_Complex:
   # Morse–Smale complex of a scalar field on every mesh: regions of the maxima = protrusion segmentation,
   # critical points after persistence simplification (csv + plots under Results/<scene>/MSComplexAnalysis).
@@ -77,5 +86,169 @@ MS_Complex:
     fate_radius: 0.04                 # nearest critical point search radius (fraction of sqrt(area))
     growth_tolerance: 0.002           # |normal displacement| below this is 'stable'
     ghost_horizon: 6                  # frames a vanished critical point keeps being followed (inversions)
+    adaptive: True                    # IoU threshold adapted to the region size and the map error
+    min_iou: 0.05                     # lowest adaptive IoU threshold
+    label_smoothing: 1                # majority-filter passes of the transported labels
+    tip_rescue: True                  # unmatched tips landing in an unmatched region are matched
+    map_error: null                   # map error (fraction of sqrt(area)); null = estimated per transition
+    max_map_error: 0.15
+  ms_protrusion_params:               # convex-hull protrusion detection fused with the MS maxima (Huang et al. 2024)
+    enabled: True
+    beta: 0.012                       # depth threshold below the hull (fraction of the size)
+    noise_factor: 1.0
+    smooth_iters: 5                   # Taubin iterations before the hull
+    alpha: 0.08
+    min_aspect: 0.12
+    max_cap_area: 0.30
+    max_tip_depth: 0.25
+    core_fraction: 0.25
+    temporal: True                    # tips of the previous frame lower the threshold locally
+    temporal_beta_factor: 0.5
+    temporal_radius: 2.0
+    prune_ms: False
+    prune_depth: 0.35
   # scalar_args:                      # extra options of ms_scalar when it differs from the Reeb field
   #   vertex_ref_index: 'mass_center' # (options already given in Reeb_Graph/scalar_args are shared)
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Continuous models (they need the functional maps: Functional_Map/matrix_tranformation now or Transform_Matrices on
+# disk). A section may give its parameters nested (param_params, traj_params, ...) as in execution_pipeline.py or flat;
+# a missing section leaves the stage off.
+# ---------------------------------------------------------------------------------------------------------------------
+Parametrization:
+  compute_parametrization: True
+  param_params:
+    sphere_method: 'conformal'        # 'conformal' | 'harmonic'
+    area_weight: 0.7                  # area correction of the sphere map (0 = conformal, 1 = equiareal)
+    temporal_weight: 0.0
+    L_max: 25                         # SPHARM degree, or 'auto' (smallest degree reaching auto_target_error, within the memory)
+    reg: 1.0e-6
+    mh_modes: 80                      # manifold-harmonic modes, or 'auto'
+    auto_target_error: 0.02           # relative error aimed at by 'auto'
+    memory_fraction: 0.6              # fraction of the free GPU / CPU memory that may be used
+    export_degrees: []                # reconstructions exported as OBJ for these degrees
+    symbolic_degree: 3
+    high_degree: True                 # + high-degree SPHARM (fast spherical harmonic transform)
+    hd_lmax: 'auto'                   # 32-160; 64-128 for complex shapes (animals)
+    sht_backend: 'auto'               # 'auto' (torch-harmonics if installed) | 'torch' | 'numpy'
+    align_with_p2p: True              # temporal alignment of the sphere maps through the p2p maps
+    plots: True
+
+Trajectories:
+  compute_trajectories: True
+  traj_params:
+    trajectory_method: 'arap_tracking'   # 'arap_tracking' | 'chain'
+    tracking_params:
+      reference_rigidity: 0.5
+      data_weight: 0.5
+      icp_rounds: 3
+      icp_weight: 1.0
+      robust_rounds: 3
+      robust_scale: 2.5
+      arap_iters: 6
+      normal_threshold: 0.3
+      max_icp_distance: 4.0
+      inpainted_confidence: 0.25
+    rigidity_params:                  # as-rigid-as-possible projection (Sorkine & Alexa 2007)
+      enabled: True
+      mode: 'arap'                    # 'arap' (near-isometric motion) | 'asap' (growth allowed)
+      data_weight: 0.005
+      iterations: 15
+      keyframes: True
+      interpolations: True
+    schemes: ['linear', 'hermite_finite_difference', 'kochanek_bartels', 'bspline', 'arap_rigid',
+              'hermite_catmull_rom', 'natural_cubic', 'arap_polar']
+    substeps: 4                       # interpolated frames between two observed frames
+    validate: True                    # leave-one-frame-out ranking of the schemes
+    kinematics: True
+    export_obj: True
+    plots: True
+
+Graph_Animation:
+  compute_graph_animation: True
+  graph_animation_params:
+    graphs: ['reeb', 'mscomplex']     # 'reeb' | 'mscomplex' | 'reeb_controlled'
+    frame: 0                          # frame whose graphs are animated
+    model: ['linear', 'hermite_catmull_rom', 'natural_cubic', 'arap_polar']   # 'best' | 'observed' | scheme(s)
+    export_graphs: 'observed'         # 'observed' | 'all' | 'none'
+    plots: True
+
+Dynamic_Analysis:
+  compute_dynamic_analysis: True
+  dyn_analysis_params:
+    hodge: True
+    ftle: True
+    shape_space: True
+    change_points: True
+    homology: True
+    n_shape_modes: 4
+    pod_energy: 0.99
+    pod_max_rank: 8
+    shape_source: 'auto'              # 'auto' (by reconstruction quality) | 'spharm' | 'spharm_hd' | 'manifold' | 'trajectories'
+    shape_max_error: 0.05
+    mh_modes: 'auto'                  # 60-300 until the median and worst-region errors are met
+    shape_max_worst_error: 0.15
+    hodge_nonrigid: True              # + Hodge decomposition of the deformation-only motion
+    cp_permutations: 500              # permutation p-values of the change points + joint change points
+    spherical_spectra: True
+    spectral_lmax: 32
+    sht_backend: 'auto'
+    plots: True
+
+Reeb_Dynamics:                        # time-varying Reeb graph on the tracked mesh (needs the trajectories)
+  compute_reeb_dynamics: True
+  reeb_dynamics_params:
+    persistence: 0.08                 # relative persistence of a branch (kept down to half of it: hysteresis)
+    substeps: 4                       # time samples inside every observed interval
+    match_radius: 0.12                # largest move of a branch between samples (fraction of sqrt(area))
+    k_spectral: 60
+    plots: True
+
+Motion_Analysis:                      # rigid / non-rigid motion, trajectory-based fields, growth, polarity, events, DMD ...
+  compute_motion_analysis: True
+  motion_params:
+    rigid: True
+    fields: True                      # physical fields from the trajectories (Physical_fields/from_trajectories)
+    growth_atlas: True
+    anisotropy: True
+    ftle_window: 3
+    polarity: True
+    regions: True
+    protrusions: True
+    branches: True
+    signals: True
+    timeline: True
+    synchronization: True
+    frequency: True
+    max_lag: null
+    dmd: True
+    dmd_energy: 0.999
+    dmd_delays: 'auto'
+    dmd_forecast: 3
+    low_confidence: 0.5
+    flip_angle: 120.0
+    plots: True
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Time between the frames (nothing known = the previous behaviour, t = frame index x fm_params/dt)
+# ---------------------------------------------------------------------------------------------------------------------
+Frame_Times:
+  frame_interval: null                # e.g. 30.0 -> one frame every 30 s (command line: --frame-interval)
+  frame_times: null                   # e.g. [0, 30, 65, 90] or 'frame_times.csv' (relative to each scene folder)
+  time_unit: 's'
+  auto_detect: True                   # use frame_times.csv / times.txt found in the scene folder
+
+# ---------------------------------------------------------------------------------------------------------------------
+# GIF animations of every stage (Results/<scene>/<Stage>/gif; command line: --gif)
+# ---------------------------------------------------------------------------------------------------------------------
+GIF:
+  gif: False
+  gif_params:
+    fps: 6
+    real_time: True                   # durations proportional to the real intervals (known frame times)
+    max_frames: 240
+    panel_width: 900
+    height: 760
+    max_width: 1800
+    vectors: True
+

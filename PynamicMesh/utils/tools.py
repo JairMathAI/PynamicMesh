@@ -66,6 +66,50 @@ def extract_yaml(config_path):
 # Sections of a (scene) configuration and the extract_kwargs argument they map to.
 CONFIG_SECTIONS = {"Functional_Map": "fm_cfg", "Reeb_Graph": "rg_cfg", "Basic_Geometry": "bg_cfg",
                    "Graph_similarity": "gs_cfg", "MS_Complex": "ms_cfg"}
+# Sections of the continuous models / outputs: section -> (on/off key, parameter-dict key, default on/off).
+# The parameters may be nested under the parameter-dict key (as in execution_pipeline.py) or written flat in the
+# section; a missing section leaves the stage off (older configuration files keep their behaviour).
+STAGE_SECTIONS = {
+    "Parametrization": ("compute_parametrization", "param_params", False),
+    "Trajectories": ("compute_trajectories", "traj_params", False),
+    "Graph_Animation": ("compute_graph_animation", "graph_animation_params", False),
+    "Dynamic_Analysis": ("compute_dynamic_analysis", "dyn_analysis_params", False),
+    "Motion_Analysis": ("compute_motion_analysis", "motion_params", False),
+    "Reeb_Dynamics": ("compute_reeb_dynamics", "reeb_dynamics_params", False),
+    "GIF": ("gif", "gif_params", False),
+    "Frame_Times": (None, "time_params", None),
+}
+# keys whose yaml lists are tuples in the pipeline
+_TUPLE_KEYS = ("schemes", "validation_schemes", "graphs", "model", "export_degrees", "k_eigenfunctions")
+
+
+def _tuplify(d):
+    """yaml lists -> tuples for the keys the pipeline expects as tuples (recursively in nested dicts)."""
+    out = {}
+    for k, v in (d or {}).items():
+        if isinstance(v, dict):
+            out[k] = _tuplify(v)
+        elif isinstance(v, list) and k in _TUPLE_KEYS:
+            out[k] = tuple(v)
+        else:
+            out[k] = v
+    return out
+
+
+def stage_kwargs(cfg):
+    """run_pipeline keyword arguments of the continuous-model / output sections (STAGE_SECTIONS)."""
+    kwargs = {}
+    for name, (flag, params_key, default) in STAGE_SECTIONS.items():
+        if name not in (cfg or {}):
+            continue
+        sec = dict(cfg.get(name) or {})
+        if flag is not None:
+            kwargs[flag] = bool(sec.pop(flag, True if sec else default))
+        nested = sec.pop(params_key, None)
+        params = {**dict(nested or {}), **sec}          # nested and flat forms are both accepted
+        if params:
+            kwargs[params_key] = _tuplify(params)
+    return kwargs
 # Advanced options of the Morse–Smale region tracker (RegionTracker); accepted nested in
 # `ms_tracker_params` or flat inside the MS_Complex section.
 MS_TRACKER_KEYS = ("iou_threshold", "dominance", "fate_radius", "growth_tolerance", "ghost_horizon")
@@ -75,18 +119,24 @@ def kwargs_from_config(cfg):
     """
     run_pipeline keyword arguments from a whole configuration mapping (the yaml of one scene or the
     single-scene yaml): every known section (Functional_Map, Reeb_Graph, Basic_Geometry,
-    Graph_similarity, MS_Complex) is passed to extract_kwargs; the `Data` section is ignored.
-    Nested mappings (fm_params, ms_tracker_params) are kept as dictionaries.
+    Graph_similarity, MS_Complex) is passed to extract_kwargs, the sections of the continuous models and
+    outputs (Parametrization, Trajectories, Graph_Animation, Dynamic_Analysis, GIF, Frame_Times) to
+    stage_kwargs; the `Data` section is ignored. Nested mappings (fm_params, ms_tracker_params,
+    ms_protrusion_params, param_params, traj_params, ...) are kept as dictionaries.
     """
     cfg = cfg or {}
     sections = {arg: dict(cfg.get(name, {}) or {}) for name, arg in CONFIG_SECTIONS.items()}
     fm_params = sections["fm_cfg"].pop("fm_params", None)
     ms_tracker = sections["ms_cfg"].pop("ms_tracker_params", None)
+    ms_protrusion = sections["ms_cfg"].pop("ms_protrusion_params", None)
     kwargs = extract_kwargs(**sections)
     if fm_params:
         kwargs["fm_params"] = dict(fm_params)
     if ms_tracker:
         kwargs["ms_tracker_params"] = dict(ms_tracker)
+    if ms_protrusion:
+        kwargs["ms_protrusion_params"] = dict(ms_protrusion)
+    kwargs.update(stage_kwargs(cfg))                       # Parametrization, Trajectories, ..., GIF, Frame_Times
     return kwargs
 
 
@@ -293,7 +343,9 @@ def resolve_scalar_args(reeb_scalar, scalar_kwargs, index, num_vertices, loaded_
 
     if 'geodesic' in methods_to_check or 'mass_center_geodesic' in methods_to_check:
         vertex_ref_index = scalar_kwargs.get("vertex_ref_index", None)
-        if vertex_ref_index == 'precomputed':
+        if isinstance(vertex_ref_index, str) and vertex_ref_index in ('auto', 'auto_center', 'auto_extremity'):
+            kwargs_out['vertex_ref_index'] = vertex_ref_index    # resolved on the mesh (reeb_graph.resolve_auto_references)
+        elif vertex_ref_index == 'precomputed':
             selection = landmark_parser(vertex_ref_index, loaded_selections, index, 'geodesic')
             kwargs_out['vertex_ref_index'] = selection
             
@@ -319,7 +371,9 @@ def resolve_scalar_args(reeb_scalar, scalar_kwargs, index, num_vertices, loaded_
 
     if 'heat_diffusion' in methods_to_check or 'matern_kernel' in methods_to_check:
         source_idx = scalar_kwargs.get("source_idx", None)
-        if source_idx == 'precomputed':
+        if isinstance(source_idx, str) and source_idx in ('auto', 'auto_center', 'auto_extremity'):
+            kwargs_out['source_idx'] = source_idx                # resolved on the mesh (reeb_graph.resolve_auto_references)
+        elif source_idx == 'precomputed':
             selection = landmark_parser(source_idx, loaded_selections, index, 'heat_diffusion')
             kwargs_out['source_idx'] = selection
             
@@ -340,8 +394,12 @@ def resolve_scalar_args(reeb_scalar, scalar_kwargs, index, num_vertices, loaded_
     if 'harmonic' in methods_to_check:
         source_idx = scalar_kwargs.get("source_idx", None)
         sink_idx = scalar_kwargs.get("sink_idx", None)
-        
-        if source_idx == 'precomputed':
+        auto_ = ('auto', 'auto_center', 'auto_extremity')
+        if (isinstance(source_idx, str) and source_idx in auto_) or (isinstance(sink_idx, str) and sink_idx in auto_):
+            # resolved on the mesh (reeb_graph.resolve_auto_references); a numeric source / sink given with it is kept
+            kwargs_out['source_idx'] = source_idx if source_idx is not None else 'auto'
+            kwargs_out['sink_idx'] = sink_idx if sink_idx is not None else 'auto'
+        elif source_idx == 'precomputed':
             selection = landmark_parser(source_idx, loaded_selections, index, 'harmonic')
             if selection is not None and len(selection) >= 2:
                 kwargs_out['source_idx'] = selection[0]
@@ -399,4 +457,4 @@ def optimize_param(meshn_1, meshn):
         step = 2
     else:
         return None 
-    return (nit, step)
+    return (nit, step)
