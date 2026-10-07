@@ -202,6 +202,8 @@ Reeb_Dynamics:                        # time-varying Reeb graph on the tracked m
     substeps: 4                       # time samples inside every observed interval
     match_radius: 0.12                # largest move of a branch between samples (fraction of sqrt(area))
     k_spectral: 60
+    ms_regions: True                  # Morse–Smale regions of the protrusion branches + their adjacency graph
+    contact_threshold: 0.02           # relative common boundary for two regions to touch
     plots: True
 
 Motion_Analysis:                      # rigid / non-rigid motion, trajectory-based fields, growth, polarity, events, DMD ...

@@ -35,7 +35,8 @@ import matplotlib.pyplot as plt
 
 from PynamicMesh.core.dyn_common import logged_stage, progress, pbar, ensure_dir, find_frame_times, face_normals_areas
 
-REEB_DYNAMICS_DEFAULTS = {"persistence": 0.08, "substeps": 4, "match_radius": 0.12, "k_spectral": 60, "plots": True}
+REEB_DYNAMICS_DEFAULTS = {"persistence": 0.08, "substeps": 4, "match_radius": 0.12, "k_spectral": 60, "plots": True,
+                          "ms_regions": True, "contact_threshold": 0.02}
 
 
 # --------------------------------------------------------------------------------------------------------------- #
@@ -65,12 +66,15 @@ def _edges(F):
     return np.unique(e, axis=0)
 
 
-def branch_pairs(f, nbr_ptr, nbr_idx, tau):
+def branch_pairs(f, nbr_ptr, nbr_idx, tau, regions=False):
     """
     Persistence pairs of the minima of f (sweep upwards, union-find, elder rule): every minimum m whose component
     merges into an older one at the saddle s gives (m, s, f(s) − f(m), elder minimum). Pairs with persistence ≥ tau are
     returned, plus the global minimum as an essential pair (saddle −1). Ties broken by vertex index (simulation of
     simplicity). For the maxima call it with −f.
+    regions=True also returns, for every vertex, the extremum of the component it joined (its region before any
+    simplification: for −f these are the Morse–Smale cells of the maxima) and, for every merge, the extremum that
+    absorbed the younger one: (pairs, ext_of_vertex, merged_into).
     """
     n = len(f)
     order = np.lexsort((np.arange(n), f))
@@ -86,16 +90,22 @@ def branch_pairs(f, nbr_ptr, nbr_idx, tau):
             parent[x], x = r, parent[x]
         return r
     pairs = []
+    ext_of = np.full(n, -1, dtype=np.int64) if regions else None
+    merged_into = {}
     for v in order:
         nb = nbr_idx[nbr_ptr[v]:nbr_ptr[v + 1]]
         nb = nb[rank[nb] < rank[v]]
         parent[v] = v
         if not len(nb):
             birth[v] = v
+            if regions:
+                ext_of[v] = v
             continue
         roots = {find(w) for w in nb}
         if len(roots) == 1:
             r = roots.pop(); parent[v] = r
+            if regions:
+                ext_of[v] = birth[r]
             continue
         roots = sorted(roots, key=lambda r: rank[birth[r]])   # elder = lowest extremum
         elder = roots[0]
@@ -103,20 +113,59 @@ def branch_pairs(f, nbr_ptr, nbr_idx, tau):
             p = f[v] - f[birth[r]]
             if p >= tau:
                 pairs.append((int(birth[r]), int(v), float(p), int(birth[elder])))
+            if regions:
+                merged_into[int(birth[r])] = int(birth[elder])
             parent[r] = elder
         parent[v] = elder
+        if regions:
+            ext_of[v] = birth[elder]
     gmin = int(order[0])
     pairs.append((gmin, -1, float(f.max() - f.min()), -1))
+    if regions:
+        return pairs, ext_of.astype(np.int32), merged_into
     return pairs
+
+
+def steepest_ascent_maxima(f, nbr_ptr, nbr_idx):
+    """
+    Morse–Smale (ascending) cells of the maxima: every vertex follows its steepest-ascent neighbour (the highest
+    neighbour, if higher than itself) up to a local maximum; returns that maximum for every vertex. Ties are broken
+    by the vertex index, consistently with the sweep of branch_pairs (simulation of simplicity). Vectorised: one
+    pointer per vertex, then pointer jumping (about log2(n) rounds).
+    """
+    n = len(f)
+    order = np.lexsort((np.arange(n), -f))                     # same total order as the sweep of -f
+    rank = np.empty(n, dtype=np.int64); rank[order] = np.arange(n)   # smaller rank = higher
+    src = np.repeat(np.arange(n), np.diff(nbr_ptr))
+    r_nb = rank[nbr_idx]
+    # highest neighbour of every vertex: minimum rank per source (sort by (src, rank), first of each block)
+    o = np.lexsort((r_nb, src))
+    first = np.r_[0, np.flatnonzero(np.diff(src[o])) + 1]
+    best_src = src[o][first]; best_nb = nbr_idx[o][first]
+    nxt = np.arange(n)
+    up = rank[best_nb] < rank[best_src]
+    nxt[best_src[up]] = best_nb[up]
+    for _ in range(64):                                         # pointer jumping to the local maximum
+        nn = nxt[nxt]
+        if np.array_equal(nn, nxt):
+            break
+        nxt = nn
+    return nxt.astype(np.int32)
 
 
 def _sample_task(args):
     """Branches of one time sample (worker-friendly): maxima from −f, minima from f."""
-    f, nbr_ptr, nbr_idx, tau_low = args
+    f, nbr_ptr, nbr_idx, tau_low = args[:4]
+    with_regions = bool(args[4]) if len(args) > 4 else False
     fr = float(np.ptp(f)) or 1.0
-    mx = [(e, s, p / fr, par) for e, s, p, par in branch_pairs(-f, nbr_ptr, nbr_idx, tau_low * fr)]
+    if with_regions:
+        pmx, _, merged = branch_pairs(-f, nbr_ptr, nbr_idx, tau_low * fr, regions=True)
+        ext_of = steepest_ascent_maxima(f, nbr_ptr, nbr_idx)          # Morse–Smale cells of the maxima
+    else:
+        pmx, ext_of, merged = branch_pairs(-f, nbr_ptr, nbr_idx, tau_low * fr), None, None
+    mx = [(e, s, p / fr, par) for e, s, p, par in pmx]
     mn = [(e, s, p / fr, par) for e, s, p, par in branch_pairs(f, nbr_ptr, nbr_idx, tau_low * fr)]
-    return mx, mn
+    return mx, mn, ext_of, merged
 
 
 # --------------------------------------------------------------------------------------------------------------- #
@@ -264,7 +313,8 @@ def compute_reeb_dynamics(target_folder, reeb_scalar="geodesic", scalar_kwargs=N
     ptr = np.searchsorted(nb[:, 0], np.arange(n + 1)); idx = nb[:, 1].copy()
     tau = float(p["persistence"])
     from PynamicMesh.core import accel
-    res = accel.parallel_map(_sample_task, [(f_, ptr, idx, 0.5 * tau) for f_ in sf], desc="Branches per time sample")
+    with_regions = bool(p.get("ms_regions", True))
+    res = accel.parallel_map(_sample_task, [(f_, ptr, idx, 0.5 * tau, with_regions) for f_ in sf], desc="Branches per time sample")
     progress("branches per sample")
     # 4. tracking (discrete Jacobi curve) and events
     size = float(np.sqrt(face_normals_areas(X[0], F0)[1].sum()))
@@ -287,9 +337,21 @@ def compute_reeb_dynamics(target_folder, reeb_scalar="geodesic", scalar_kwargs=N
     if len(paths):                                    # unique branch label: track numbers restart for every kind
         paths["branch"] = paths["kind"].astype(str) + "_" + paths["track"].astype(str)
     paths.to_csv(out / "paths.csv", index=False)
+    reg_tab = adj_tab = None
+    if with_regions and len(paths):
+        # Morse–Smale regions of the protrusion branches on the tracked mesh, their adjacency (the MS graph) and its events
+        reg_tab, adj_tab, reg_events = _ms_regions(out, st, res, paths, X, F0, t, E, float(p.get("contact_threshold", 0.02)))
+        events += reg_events
     ev = pd.DataFrame(events, columns=["time", "sample", "event", "kind", "track", "other"]).sort_values(["time", "event"])
     if len(ev):
         ev["branch"] = ev["kind"].astype(str) + "_" + ev["track"].astype(str)
+        is_reg = ev["kind"] == "region"                  # contacts between the regions of two protrusion branches
+        if is_reg.any():
+            # 'other' holds numbers (branch events) and branch names (region events): a general column, otherwise
+            # pandas >= 3 refuses to write text into a column it stored as integers
+            ev["other"] = ev["other"].astype(object)
+            ev.loc[is_reg, "branch"] = ("max_" + ev.loc[is_reg, "track"].astype(int).astype(str)).to_numpy(object)
+            ev.loc[is_reg, "other"] = ("max_" + ev.loc[is_reg, "other"].astype(int).astype(str)).to_numpy(object)
     ev.to_csv(out / "events.csv", index=False)
     samp = paths.groupby(["sample", "time", "kind"]).track.count().unstack(fill_value=0).reset_index() if len(paths) else pd.DataFrame()
     if len(samp):
@@ -315,11 +377,118 @@ def compute_reeb_dynamics(target_folder, reeb_scalar="geodesic", scalar_kwargs=N
         json.dump(summary, fh, indent=2, default=str)
     if p["plots"] and len(paths):
         _plots(out, paths, ev, samp, unit)
+        _region_plots(out, reg_tab, adj_tab, unit)
     progress("tracks, summary and plots")
     if verbose:
         print(f"Reeb dynamics: {summary['n_protrusion_branches']} protrusion / {summary['n_dent_branches']} dent branches, "
               f"{len(ev)} events over {len(st)} samples")
     return summary
+
+
+def _ms_regions(out, st, res, paths, X, F0, t, E, contact_threshold=0.02):
+    """
+    Morse–Smale regions of the protrusion branches on the tracked mesh. At every sample each vertex belongs to the
+    maximum reached by steepest ascent (the ascending Morse–Smale cell of that maximum); a maximum that is not a tracked
+    branch (below the persistence threshold) gives its cell to the branch it merges into in the sweep of −f — the
+    persistence simplification of the Morse–Smale complex. Regions therefore carry the identity of their branch (max_<track>)
+    through time, from the tracked mesh (no functional maps).
+    Adjacency (the Morse–Smale graph): two regions touch when their common boundary (sum of the lengths of the mesh
+    edges joining them, relative to sqrt(area)) exceeds contact_threshold; hysteresis: a contact starts above the
+    threshold and ends below half of it. Events 'regions start touching' / 'regions stop touching' (kind 'region')
+    between regions that both existed at the previous sample.
+    Writes regions/labels.npz (labels per sample: track of every vertex, -1 = none), regions.csv (per sample and
+    region: area, area fraction, centroid, number of neighbours) and adjacency.csv (touching pairs and their boundary).
+    """
+    T = X.shape[0]; n = X.shape[1]
+    d = ensure_dir(out / "regions")
+    mx = paths[paths.kind == "max"]
+    by_sample = {int(si): dict(zip(g.extremum.astype(int), g.track.astype(int))) for si, g in mx.groupby("sample")}
+    labels = np.full((len(st), n), -1, dtype=np.int32)
+    reg_rows, adj_rows, events = [], [], []
+    touching = {}                                       # (a, b) -> bool, with hysteresis
+    prev_tracks = None
+    for si, ts in enumerate(st):
+        ext_of, merged = res[si][2], res[si][3]
+        if ext_of is None:
+            continue
+        tracked = by_sample.get(si, {})
+        lut = {}
+        for e in np.unique(ext_of):
+            e0 = int(e); seen = 0
+            while e0 not in tracked and e0 in merged and seen < 100000:
+                e0 = merged[e0]; seen += 1
+            lut[int(e)] = tracked.get(e0, -1)
+        lab = np.vectorize(lut.get, otypes=[np.int32])(ext_of)
+        labels[si] = lab
+        # geometry at the sample: tracked mesh interpolated in time
+        k = int(np.clip(np.searchsorted(t, ts, side="right") - 1, 0, max(T - 2, 0)))
+        a = 0.0 if T < 2 else float((ts - t[k]) / max(t[min(k + 1, T - 1)] - t[k], 1e-300))
+        Xs = (1 - a) * X[k] + a * X[min(k + 1, T - 1)]
+        fa = face_normals_areas(Xs, F0)[1]
+        va = np.zeros(n); np.add.at(va, F0.ravel(), np.repeat(fa / 3.0, 3))
+        size = float(np.sqrt(fa.sum())) or 1.0
+        ids = sorted(int(x) for x in np.unique(lab) if x >= 0)
+        # boundaries between regions
+        la, lb = lab[E[:, 0]], lab[E[:, 1]]
+        cross = (la != lb) & (la >= 0) & (lb >= 0)
+        lens = np.linalg.norm(Xs[E[cross, 0]] - Xs[E[cross, 1]], axis=1) / size
+        pa, pb = np.minimum(la[cross], lb[cross]), np.maximum(la[cross], lb[cross])
+        contact = {}
+        for x_, y_, l_ in zip(pa, pb, lens):
+            contact[(int(x_), int(y_))] = contact.get((int(x_), int(y_)), 0.0) + float(l_)
+        now = {}
+        for pair in set(contact) | set(touching):
+            c = contact.get(pair, 0.0); was = touching.get(pair, False)
+            on = c >= contact_threshold if not was else c >= 0.5 * contact_threshold
+            if on and pair[0] in ids and pair[1] in ids:
+                now[pair] = True
+                adj_rows.append({"sample": si, "time": float(ts), "branch_a": f"max_{pair[0]}", "branch_b": f"max_{pair[1]}",
+                                 "track_a": pair[0], "track_b": pair[1], "contact": c})
+            existed = prev_tracks is not None and pair[0] in prev_tracks and pair[1] in prev_tracks
+            if existed and on != was and pair[0] in ids and pair[1] in ids:
+                events.append({"time": float(ts), "sample": si, "event": "regions start touching" if on else "regions stop touching",
+                               "kind": "region", "track": pair[0], "other": pair[1]})
+        touching = now
+        nbrs = {i: 0 for i in ids}
+        for (x_, y_) in now:
+            nbrs[x_] = nbrs.get(x_, 0) + 1; nbrs[y_] = nbrs.get(y_, 0) + 1
+        tot = float(va.sum()) or 1.0
+        for i in ids:
+            m = lab == i; A = float(va[m].sum())
+            c = (va[m, None] * Xs[m]).sum(0) / max(A, 1e-300)
+            reg_rows.append({"sample": si, "time": float(ts), "branch": f"max_{i}", "track": i, "area": A,
+                             "area_fraction": A / tot, "x": c[0], "y": c[1], "z": c[2], "n_neighbors": nbrs.get(i, 0)})
+        prev_tracks = set(ids)
+    np.savez_compressed(d / "labels.npz", labels=labels, sample_time=np.asarray(st, float))
+    reg = pd.DataFrame(reg_rows); adj = pd.DataFrame(adj_rows)
+    reg.to_csv(out / "regions.csv", index=False); adj.to_csv(out / "adjacency.csv", index=False)
+    return reg, adj, events
+
+
+def _region_plots(out, reg, adj, unit):
+    if reg is None or not len(reg):
+        return
+    fig, ax = plt.subplots(2, 1, figsize=(12, 7.5), sharex=True)
+    for b, g in reg.groupby("branch"):
+        ax[0].plot(g.time, g.area_fraction, "-", lw=1.4, label=b)
+        ax[1].step(g.time, g.n_neighbors, where="post", lw=1.2)
+    ax[0].set_ylabel("area fraction of the surface"); ax[0].set_title("Morse–Smale regions of the protrusion branches (tracked mesh)")
+    ax[0].legend(fontsize=7, ncol=4); ax[0].grid(alpha=0.3)
+    ax[1].set_ylabel("neighbouring regions"); ax[1].set_xlabel(f"time ({unit})"); ax[1].grid(alpha=0.3)
+    ax[1].set_title("number of neighbours of every region in the Morse–Smale graph")
+    fig.tight_layout(); fig.savefig(Path(out) / "plots" / "4_ms_regions.png", dpi=200); plt.close(fig)
+    if adj is not None and len(adj):
+        pairs = sorted({(r.branch_a, r.branch_b) for r in adj.itertuples()})
+        fig, ax = plt.subplots(figsize=(12, 1.6 + 0.32 * len(pairs)))
+        times = np.sort(reg.time.unique()); dt = float(np.median(np.diff(times))) if len(times) > 1 else 1.0
+        for i, pr in enumerate(pairs):
+            g = adj[(adj.branch_a == pr[0]) & (adj.branch_b == pr[1])]
+            ax.scatter(g.time, np.full(len(g), i), c=g.contact, cmap="viridis", s=18, marker="s",
+                       vmin=0, vmax=float(adj.contact.quantile(0.95)) or 1.0)
+        ax.set_yticks(range(len(pairs))); ax.set_yticklabels([f"{a} – {b}" for a, b in pairs], fontsize=7)
+        ax.set_xlabel(f"time ({unit})"); ax.grid(alpha=0.3, axis="x")
+        ax.set_title("contacts between regions (edges of the Morse–Smale graph; colour = length of the common boundary)")
+        fig.tight_layout(); fig.savefig(Path(out) / "plots" / "5_ms_contacts.png", dpi=200); plt.close(fig)
 
 
 def _plots(out, paths, ev, samp, unit):

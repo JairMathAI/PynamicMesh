@@ -1849,10 +1849,26 @@ def visualize_reeb_dynamics(results_path, mesh_path=None, stride=1):
     color = {k: cmap(i % 20)[:3] for i, k in enumerate(branches)}
     clim = [float(np.percentile(Fk, 1)), float(np.percentile(Fk, 99))]
     modes = ["branches on the moving surface", "branches + critical-point paths"]
+    # Morse–Smale regions of the protrusion branches and their adjacency graph (if computed)
+    lab_f = rd / "regions" / "labels.npz"
+    regions = adjacency = labels = s_time = None
+    if lab_f.exists() and (rd / "regions.csv").exists():
+        zl = np.load(lab_f); labels, s_time = zl["labels"], zl["sample_time"]
+        regions = pd.read_csv(rd / "regions.csv")
+        adjacency = pd.read_csv(rd / "adjacency.csv") if (rd / "adjacency.csv").stat().st_size > 1 else None
+        modes.append("Morse–Smale regions + graph")
+        modes.append("Morse–Smale regions + graph + paths")
+        for b in sorted(regions.branch.unique()):
+            if b not in color:
+                color[b] = cmap(len(color) % 20)[:3]
 
     class Viewer(_FrameViewer):
         title = "Time-varying Reeb graph"
-        help_text = ("m : view (branches / branches + paths)\n"
+        help_text = ("m : view (branches / branches + paths / Morse–Smale regions + graph / ... + paths)\n"
+                     "Regions: the Morse–Smale cell of every protrusion branch (vertices whose steepest ascent reaches\n"
+                     "its maximum), coloured like its branch; graph: one node per region (its centre), one edge per\n"
+                     "pair of regions in contact. Paths (last view): thick = centre of every region (node of the graph)\n"
+                     "up to now, thin = tip of the branch, both in the colour of the region.\n"
                      "Spheres: extremum of every branch of the Reeb graph (protrusion = maximum + saddle, dent = minimum +\n"
                      "saddle), coloured by branch identity; big spheres = the trunk (global extremum).\n"
                      "Paths: the trajectory of every extremum over time (discrete Jacobi curve).\n"
@@ -1861,6 +1877,41 @@ def visualize_reeb_dynamics(results_path, mesh_path=None, stride=1):
 
         def draw(self):
             self.clear(); p = self.plotter; k = self.k
+            view = self.mode % len(modes)
+            if view in (2, 3):                             # Morse–Smale regions + their adjacency graph (+ paths)
+                si = int(np.argmin(np.abs(s_time - t_obs[k])))
+                lab = labels[si]
+                rgb = np.full((len(lab), 3), 0.75)
+                for tid in np.unique(lab[lab >= 0]):
+                    rgb[lab == tid] = color.get(f"max_{int(tid)}", (0.5, 0.5, 0.5))
+                m = _poly(X[k], F); m["region"] = (rgb * 255).astype(np.uint8)
+                p.add_mesh(m, scalars="region", rgb=True, smooth_shading=True, opacity=0.9 if self.show_mesh else 0.15)
+                rk = regions[regions["sample"] == si]
+                cen = {r.branch: np.array([r.x, r.y, r.z]) for r in rk.itertuples()}
+                for b, c in cen.items():
+                    p.add_mesh(self.pv.Sphere(radius=0.02 * diam, center=c), color=color.get(b, (0.5, 0.5, 0.5)))
+                n_edges = 0
+                if adjacency is not None and len(adjacency):
+                    for r in adjacency[adjacency["sample"] == si].itertuples():
+                        if r.branch_a in cen and r.branch_b in cen:
+                            p.add_mesh(self.pv.Line(cen[r.branch_a], cen[r.branch_b]), color="black", line_width=3)
+                            n_edges += 1
+                if view == 3:
+                    # paths up to now: centres of the regions (nodes of the graph, thick) and tips of the branches (thin)
+                    past = regions[regions.time <= s_time[si] + 1e-12]
+                    for b, g in past.groupby("branch"):
+                        g = g.sort_values("sample")
+                        if len(g) > 1:
+                            p.add_mesh(self.pv.lines_from_points(g[["x", "y", "z"]].to_numpy()), color=color.get(b, (0.5, 0.5, 0.5)),
+                                       line_width=5)
+                    tips = paths[(paths.kind == "max") & (paths.time <= s_time[si] + 1e-12)]
+                    for b, g in tips.groupby("branch"):
+                        g = g.sort_values("sample")
+                        if len(g) > 1:
+                            p.add_mesh(self.pv.lines_from_points(g[["x", "y", "z"]].to_numpy()), color=color.get(b, (0.5, 0.5, 0.5)),
+                                       line_width=2)
+                self.label(f"view: {modes[view]}  |  regions {len(cen)}, contacts {n_edges}  (t = {s_time[si]:.4g})")
+                return
             if self.show_mesh:
                 m = _poly(X[k], F); m["Reeb field"] = Fk[k]
                 p.add_mesh(m, scalars="Reeb field", cmap="coolwarm", clim=clim, opacity=0.85, smooth_shading=True,
@@ -1870,13 +1921,13 @@ def visualize_reeb_dynamics(results_path, mesh_path=None, stride=1):
                 pt = X[k][int(r.extremum)]
                 rad = (0.035 if r.essential else 0.022) * diam
                 p.add_mesh(self.pv.Sphere(radius=rad, center=pt), color=color[r.branch])
-            if self.mode % 2 == 1:
+            if view == 1:
                 for bid, g in paths[paths.time <= t_obs[k] + 1e-12].groupby("branch"):
                     g = g.sort_values("sample")
                     if len(g) > 1:              # polyline through the sampled positions (a spline would overshoot)
                         p.add_mesh(self.pv.lines_from_points(g[["x", "y", "z"]].to_numpy()), color=color[bid], line_width=3)
             nm = int((near.kind == "max").sum()); nd = int((near.kind == "min").sum())
-            self.label(f"view: {modes[self.mode % 2]}  |  protrusion branches {nm}, dent branches {nd}")
+            self.label(f"view: {modes[view]}  |  protrusion branches {nm}, dent branches {nd}")
 
     _launch(Viewer(T, len(modes), names=names, screenshot_dir=rd / "plots", screenshot_name="reeb_dynamics"), modes, t_obs)
 
