@@ -1832,6 +1832,8 @@ A scalar field such as `dist_centroid` finds the protrusions that point *away fr
 
 The hull tips are **fused** with the Morse–Smale maxima: a maximum inside a cap confirms it (`source='ms+hull'`), caps without maximum are carved out of their Morse–Smale region as new protrusions with a saddle at their pass (`source='hull'`), and every protrusion gets a **core** (its upper part). The tips of the previous frame lower the threshold locally (`temporal`), so a protrusion that becomes shallow is not lost. On a synthetic test with 11 protrusions the recall rose from 27 % (field maxima alone) to 100 % at equal precision. The Euler relation $\#\min-\#\text{saddle}+\#\max=2$ is preserved.
 
+Frame by frame, how many protrusions were found by each detector, and the size of their cores, are shown in `plots/protrusion_detection_evolution.png` (see the results of this chapter).
+
 </details>
 
 <details>
@@ -2037,7 +2039,7 @@ visualize_ms_complex(mesh_path, ms_path)
 
 The modes (`m`) show the segmentation, the correspondence between frames, the fates of the critical points and the protrusions (cores, tips coloured by detector, depth below the convex hull); press `i` for all the keys.
 
-**Euler check against the surface.** `critical_points.csv` reports the Euler number of the simplified complex ($\#\min - \#\text{saddle} + \#\max$, `euler_simplified`), the Euler characteristic of the surface ($\chi = V - E + F$, `surface_euler`), its genus and `euler_consistent`: a complex that does not reproduce $\chi$ misses topology of the surface — typically tiny handles (self-contacts, defects of the mesh) below the persistence threshold, the same situation reported by the `Hidden_Handles` of the Reeb graphs. The topological control of the Reeb graphs is not applied to the Morse–Smale graphs: they are not built from slabs (nothing can hide inside a slab), the persistence simplification cancels critical points in pairs (the Euler relation is preserved by construction), and their loops come from the adjacency of the protrusion regions, not from the genus — the Euler check is the meaningful topological diagnostic here.
+**Euler check against the surface.** `critical_points.csv` reports the Euler number of the simplified complex ($\sharp\min - \sharp\text{saddle} + \sharp\max$, `euler_simplified`), the Euler characteristic of the surface ($\chi = V - E + F$, `surface_euler`), its genus and `euler_consistent`: a complex that does not reproduce $\chi$ misses topology of the surface — typically tiny handles (self-contacts, defects of the mesh) below the persistence threshold, the same situation reported by the `Hidden_Handles` of the Reeb graphs. The topological control of the Reeb graphs is not applied to the Morse–Smale graphs: they are not built from slabs (nothing can hide inside a slab), the persistence simplification cancels critical points in pairs (the Euler relation is preserved by construction), and their loops come from the adjacency of the protrusion regions, not from the genus — the Euler check is the meaningful topological diagnostic here.
 
 With known [frame times](#time-between-frames) the reports gain time columns, `region_tracks.csv` the **lifetime** of every protrusion and `tracking_summary.csv` the birth / death / split / merge rates per time unit.
 
@@ -2054,9 +2056,14 @@ Folder layout of `Results/<scene>/MSComplexAnalysis/`:
 * `MS_Complex/` — per frame: `MS_T####.pkl` (the complete complex), `Scalar_T####.npy` (the field), `Labels_T####.npy` (region of every vertex, identified by the vertex index of its maximum);
 * `critical_points.csv`, `critical_points_detail.csv`, `plots/critical_points_evolution.png`;
 * `MS_Graphs/` and `Graph_analysis/` — the critical-point graphs and the Reeb-graph analyses run on them (`time_analysis.csv`, `MS_Graphs_pairwise_graph_similarity.csv`, plots), documented in the <b>Reeb graph</b> and <b>Graph similarity</b> sections;
-* `Protrusions/` — the convex-hull detection: tips, caps and their source per frame, a summary csv and a stacked-area plot; per frame `HullDepth_T####.npy` and `Core_T####.npy` in `MS_Complex/`;
+* `Protrusions/` — the convex-hull detection: tips, caps and their source per frame (`protrusions_detail.csv`, `hull_candidates.csv`) and a summary csv (`protrusions_summary.csv`); per frame `HullDepth_T####.npy` and `Core_T####.npy` in `MS_Complex/`;
 * `Region_tracking/` — the dynamics: `region_lineage.csv`, `region_tracks.csv`, `critical_point_fates.csv`, `critical_point_trajectories.csv`, `tracking_summary.csv`, `fate_transition_counts.csv`, `long_fate_counts.csv`, `fate_meanings.json`, and the per-transition `mapped_T####_T####.npz` used by the viewer;
-* `plots/` — `region_events_evolution.png`, `fate_transition_matrix.png`, `protrusion_lineage.png`, `critical_point_trajectories.png`.
+* `plots/` — `region_events_evolution.png`, `fate_transition_matrix.png`, `protrusion_lineage.png`, `critical_point_trajectories.png`, `protrusion_detection_evolution.png`.
+
+`protrusion_detection_evolution.png` summarises the protrusion detection (see <b>Convex-hull protrusion detection</b>) frame by frame. Top panel: the number of protrusions as stacked areas by how they were found — **MS + hull (both)** (a Morse–Smale maximum confirmed by a convex-hull tip), **MS only** (a maximum of the scalar field without a hull tip) and **hull only** (recovered: a protrusion the scalar field missed, carved out of its Morse–Smale region) — with a dotted line for the protrusions **accepted by temporal support** (present in neighbouring frames). Bottom panel: the protrusion **cores** — the fraction of the surface covered by the cores (protrusion vs cell body) and their mean height relative to the equivalent radius of the cell. A growing "hull only" band means the scalar field alone misses protrusions (on the flanks, small, or on top of others); a gap between the stacked total and the dotted line means detections that do not persist in time.
+
+<img src="./assets/protrusion_detection_evolution.png" style="width: 25%; height: 25%; display: block; margin: 10px auto;"/>
+
 
 <details>
 <summary><span style="font-size:21px;">Critical points per frame</span></summary>
@@ -2898,6 +2905,10 @@ Events are located **between** the observed frames, every branch has a birth tim
 
 **Events.** An unmatched new branch is a birth, an unmatched old one a death — by the index lemma of the paper the two critical points created or destroyed together differ in index by one (maximum + saddle or minimum + saddle). Two related junctions (siblings on the same parent, or a branch and its parent) whose order flips form an interchange; the essential trunk passing to another extremum is a dominance change.
 
+**Morse–Smale regions and graph** (`ms_regions`). The protrusion branches are the maxima of the Morse–Smale complex, so the same tracking also follows its **regions**. At every sample, each vertex of the tracked mesh belongs to the maximum reached by steepest ascent (the ascending Morse–Smale cell of that maximum); a maximum that is not a tracked branch (below the persistence threshold) gives its cell to the branch it merges into — the persistence simplification of the complex. Regions therefore keep the identity of their branch (`max_<track>`) through time, from the tracked mesh, without the functional maps. Two regions are **neighbours** (an edge of the Morse–Smale graph) when their common boundary — the length of the mesh edges joining them, relative to $\sqrt{\text{area}}$ — exceeds `contact_threshold`; a contact starts above the threshold and ends below half of it, so a boundary close to the threshold does not flicker. Changes of the graph between regions that both exist are events: **regions start touching** / **regions stop touching** (e.g. when the protrusion between two others retracts, the two become neighbours).
+
+The Morse–Smale analysis of `MSComplexAnalysis/` tracks its regions through the frame-to-frame functional maps; these regions come from the tracked mesh instead (continuous, located between the frames, independent of the quality of the maps).
+
 </details>
 
 <details>
@@ -2915,6 +2926,8 @@ Requires the trajectories; uses the Reeb scalar field settings (`reeb_scalar`, `
 | `substeps` | `4` | time samples inside every observed interval |
 | `match_radius` | `0.12` | largest move of a branch between samples, fraction of $\sqrt{\text{area}}$ |
 | `k_spectral` | `60` | eigenpairs for spectral fields (heat diffusion, …) on the tracked mesh |
+| `ms_regions` | `True` | Morse–Smale regions of the protrusion branches, their adjacency graph and contact events |
+| `contact_threshold` | `0.02` | common boundary (relative to $\sqrt{\text{area}}$) above which two regions touch; they stop touching below half of it |
 | `plots` | `True` | write the plots |
 
 </details>
@@ -2924,15 +2937,31 @@ Requires the trajectories; uses the Reeb scalar field settings (`reeb_scalar`, `
 
 `Results/<scene>/ReebDynamics/`: `events.csv` (time, event, kind, branch), `tracks.csv` (one row per branch: kind, birth / death time, lifetime, maximum and mean persistence, path length), `paths.csv` (the critical-point paths: branch, sample, time, extremum and saddle vertices, persistence, reference and current positions), `samples.csv` (number of protrusion and dent branches per sample), `field_on_tracked_mesh.npy`, `summary.json`, `plots/` (branch persistence with births and deaths, branch count, event timeline). The events also appear in the event timeline of the [Motion Analysis](#motion-analysis).
 
+Morse–Smale regions (`ms_regions`): `regions/labels.npz` (the region — branch track — of every vertex at every sample, -1 = none, and the sample times), `regions.csv` (per sample and region: area, area fraction of the surface, centre, number of neighbours), `adjacency.csv` (per sample, the pairs of regions in contact and the length of their common boundary), the events `regions start touching` / `regions stop touching` (kind `region`) in `events.csv`, and the plots `4_ms_regions.png` (area fraction and number of neighbours of every region over time) and `5_ms_contacts.png` (timeline of the contacts, i.e. of the edges of the Morse–Smale graph). The contact events also appear in the event timeline of the [Motion Analysis](#motion-analysis). In the viewer, the view **Morse–Smale regions + graph** shows the regions coloured like their branch, one node at the centre of every region and one edge per pair of regions in contact; the view **Morse–Smale regions + graph + paths** adds the paths up to the current time — thick: the centre of every region (how the node of the graph moves as the region moves and grows), thin: the tip of its branch. With `gif=True` every view is recorded (`reeb_dynamics_morse_smale_regions_graph.gif`, `reeb_dynamics_morse_smale_regions_graph_paths.gif`, …).
+
 How to read them: a branch with a long lifetime and a high persistence is a stable structural part (a limb, a long-lived protrusion); short-lived branches are transient protrusions; interchanges mean that the hierarchy of the protrusions reorganises (which one branches first from the body), and dominance changes that the largest protrusion changes.
+
+<img src="./assets/GraphDynPlot.png" style="max-width: 100%; height: auto; display: block; margin: 0 auto;"/>
 
 Viewer:
 ```python
 from PynamicMesh.utils.dynamics_visualizers import visualize_reeb_dynamics
-visualize_reeb_dynamics(results_path, mesh_path=mesh_path)
+visualize_reeb_dynamics(results_path, mesh_path=mesh_path)   # 'm': branches / + paths / Morse–Smale regions + graph / + paths
 ```
-
-<img src="./assets/reeb_dynamics_branches_critical_point_paths.gif" style="max-width: 100%; height: auto; display: block; margin: 0 auto;"/>
+<table>
+  <!-- ROW 1 -->
+  <tr>
+    <td align="center">
+      <img src="./assets/reeb_dynamics_branches_critical_point_paths.gif" width="100%" height="100%" /><br />
+      <sub>Reeb Branches Critical Point Paths</sub>
+    </td>
+    <td align="center">
+      <img src="./assets/RD2.gif" width="100%" height="100%" /><br />
+      <sub>MSComplex Graph Branches Critical Point Paths</sub>
+    </td>
+  </tr>
+</table>
+<img src="./assets/" style="max-width: 100%; height: auto; display: block; margin: 0 auto;"/>
 
 </details>
 </details>
