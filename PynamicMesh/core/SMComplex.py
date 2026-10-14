@@ -1111,11 +1111,32 @@ def create_hull_polydata(ms: MSComplex, vertices, faces) -> pv.PolyData:
     F = _as_faces(faces)
     it = int(ms.meta.get("protrusion_params", {}).get("smooth_iters", PROTRUSION_DEFAULTS["smooth_iters"]))
     vh = taubin_smooth(v, _neighbour_structure(v, F), it)
-    try:
-        hull = ConvexHull(vh)
-    except Exception:  # noqa: BLE001
-        hull = ConvexHull(vh, qhull_options="QJ")
-    return pv.PolyData(vh, np.c_[np.full(len(hull.simplices), 3), hull.simplices].ravel()).clean()
+    # one hull per connected surface: when the frame holds several cells (a division) the partition of the mesh
+    # induces the partition of the hull — every cell its own convex hull, as in its protrusion detection
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    e = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+    _, lab = connected_components(coo_matrix((np.ones(len(e)), (e[:, 0], e[:, 1])), shape=(len(vh), len(vh))), directed=False)
+    used = np.unique(F)
+    parts = []
+    for c in np.unique(lab[used]):
+        idx = used[lab[used] == c]
+        if len(idx) < 4:
+            continue
+        try:
+            hull = ConvexHull(vh[idx])
+        except Exception:  # noqa: BLE001
+            try:
+                hull = ConvexHull(vh[idx], qhull_options="QJ")
+            except Exception:  # noqa: BLE001
+                continue
+        parts.append(pv.PolyData(vh[idx], np.c_[np.full(len(hull.simplices), 3), hull.simplices].ravel()))
+    if not parts:
+        return pv.PolyData()
+    out = parts[0]
+    for q in parts[1:]:
+        out = out.merge(q)
+    return out.clean()
 
 
 #  Per-frame step used by the pipeline

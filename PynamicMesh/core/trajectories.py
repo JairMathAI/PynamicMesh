@@ -999,7 +999,8 @@ def compute_trajectories(mesh_folder, target_folder, loader=None, dt=1.0, scheme
     if frames is None:
         frames = load_frames(mesh_folder, loader)
     T = len(frames)
-    p2p, _ = load_p2p_chain(target_folder / "Transform_Matrices", T)
+    p2p, _ = load_p2p_chain(target_folder / "Transform_Matrices", T, frames=frames,
+                            flip_guard=(tracking_params or {}).get("flip_guard", 3.0))
     progress(total=3 + len(schemes) + int(bool(validate and T >= 3)) + int(bool(plots)), advance=0)
     if trajectory_method == "chain":
         X, F0, cov = build_trajectories(frames, p2p, verbose=verbose)

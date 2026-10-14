@@ -350,18 +350,34 @@ def save_vtp(path, V, F, point_data=None):
         return False
 
 
-def load_p2p_chain(matrix_folder, n_frames):
+def load_p2p_chain(matrix_folder, n_frames, frames=None, flip_guard=3.0):
     """
     p2p maps of the functional-map stage: p2p[i][j] = vertex of frame i-1 matched to vertex j of frame i
     (FMV_T{i:04d}_T{i-1:04d}.npy, legacy FMV_{i}{i-1}.npy).  Returns a list with None at index 0.
     Also returns the functional maps C_{i-1 -> i} when available.
+    flip_guard (with `frames`): the frames are aligned and move little between consecutive frames, so a map whose
+    mean displacement exceeds flip_guard x that of the nearest-point correspondence is a SYMMETRIC FLIP of the functional
+    map (front / back ambiguity of near-symmetric shapes); it is replaced by the nearest points (and reported), so the
+    trajectories are not dragged to mirrored positions. None disables it.
     """
     matrix_folder = Path(matrix_folder)
     p2p, fms = [None], [None]
     for i in range(1, n_frames):
         cands = [matrix_folder / f"FMV_T{i:04d}_T{i-1:04d}.npy", matrix_folder / f"FMV_{i}{i-1}.npy"]
         arr = next((np.load(c) for c in cands if c.exists()), None)
-        p2p.append(None if arr is None else np.asarray(arr, dtype=np.int64).ravel())
+        m = None if arr is None else np.asarray(arr, dtype=np.int64).ravel()
+        if m is not None and frames is not None and flip_guard and i < len(frames):
+            Vc, Vp = np.asarray(frames[i]["V"], float), np.asarray(frames[i - 1]["V"], float)
+            if len(m) == len(Vc) and m.max() < len(Vp):
+                from scipy.spatial import cKDTree
+                nn = cKDTree(Vp).query(Vc)[1]
+                d_fm = float(np.mean(np.linalg.norm(Vc - Vp[m], axis=1)))
+                d_nn = float(np.mean(np.linalg.norm(Vc - Vp[nn], axis=1)))
+                if d_fm > flip_guard * max(d_nn, 1e-12):
+                    print(f"[maps] transition {i - 1}->{i}: functional map flipped (displacement {d_fm / max(d_nn, 1e-12):.1f}x "
+                          f"the nearest points): nearest-point correspondence used")
+                    m = nn
+        p2p.append(m)
         cands = [matrix_folder / f"FMC_T{i-1:04d}_T{i:04d}.npy", matrix_folder / f"FMC_{i-1}{i}.npy"]
         arr = next((np.load(c) for c in cands if c.exists()), None)
         fms.append(arr)
@@ -441,6 +457,50 @@ def cotan_laplacian(V, F, clip_negative=False):
 def mesh_edges(F):
     e = np.sort(np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]]), axis=1)
     return np.unique(e, axis=0)
+
+
+def _install_quiet_superlu():
+    """
+    SuperLU (scipy.sparse.linalg.spsolve / splu) prints 'dgstrf info N' from C directly to the process output when a
+    matrix is singular; Python cannot redirect it and it breaks the progress bars. The two functions are wrapped so
+    that, during the call, the C-level standard output (file descriptor 1) goes to the null device; the result and
+    the Python warnings are unchanged. PYNAMIC_QUIET_SUPERLU=0 disables it.
+    """
+    import os as _os
+    if _os.environ.get("PYNAMIC_QUIET_SUPERLU", "1") == "0":
+        return
+    import scipy.sparse.linalg as _spl
+    if getattr(_spl.spsolve, "_pynamic_quiet", False):
+        return
+    import sys as _sys
+    from functools import wraps
+
+    def quiet(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                _sys.stdout.flush()
+                saved = _os.dup(1)
+                null = _os.open(_os.devnull, _os.O_WRONLY)
+            except Exception:  # noqa: BLE001 - no real file descriptor (e.g. some notebooks): call as is
+                return fn(*args, **kwargs)
+            try:
+                _os.dup2(null, 1)
+                return fn(*args, **kwargs)
+            finally:
+                _os.dup2(saved, 1); _os.close(saved); _os.close(null)
+        wrapper._pynamic_quiet = True
+        return wrapper
+    _spl.spsolve = quiet(_spl.spsolve)
+    _spl.splu = quiet(_spl.splu)
+    try:                                              # the same functions are also reachable through the submodule
+        import scipy.sparse.linalg._dsolve.linsolve as _ls
+        _ls.spsolve = _spl.spsolve; _ls.splu = _spl.splu
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_install_quiet_superlu()
 
 
 def mesh_topology(V, F):

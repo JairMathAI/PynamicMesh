@@ -18,11 +18,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "pyfmaps",  
+    "pyfmaps",
     "vedo",
     "networkx",
     "seaborn",
-    "pyvista", 
+    "pyvista",
     "pyyaml",
     "trimesh",
     "rtree",
@@ -33,7 +33,17 @@ dependencies = [
     "imageio",
     "pyacvd",
     "h5py",
-    "scikit-image"
+    "scikit-image",
+    # free CPU / GPU memory for the automatic parametrization settings (L_max, mh_modes)
+    "psutil",
+    # imported directly by the code (until now only installed through other packages)
+    "numpy",
+    "scipy",
+    "pandas",
+    "matplotlib",
+    "scikit-learn",
+    "tqdm",
+    "sympy",
 ]
 
 
@@ -53,9 +63,11 @@ rocm-7-0 = [
 spectral = [
     "torch-harmonics",
 ]
-# persistent homology of the shape trajectory (Dynamic Analysis); skipped with a message otherwise
+# persistent homology of the shape trajectory (Dynamic Analysis) and graph Ricci flow for necks
+# (Topology Events, neck_method='ricci'); without them these steps are skipped or use the default method
 topology = [
     "ripser",
+    "GraphRicciCurvature",
 ]
 # every optional analysis package (combine with one GPU extra, e.g. ".[gpu-12x,all]")
 all = [

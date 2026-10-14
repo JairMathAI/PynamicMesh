@@ -76,6 +76,7 @@ STAGE_SECTIONS = {
     "Dynamic_Analysis": ("compute_dynamic_analysis", "dyn_analysis_params", False),
     "Motion_Analysis": ("compute_motion_analysis", "motion_params", False),
     "Reeb_Dynamics": ("compute_reeb_dynamics", "reeb_dynamics_params", False),
+    "Topology_Events": ("compute_topology_events", "topology_params", True),
     "GIF": ("gif", "gif_params", False),
     "Frame_Times": (None, "time_params", None),
 }

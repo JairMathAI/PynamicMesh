@@ -1023,7 +1023,7 @@ def scene_features(scene_dir):
     return f
 
 
-def compare_scenes(results_root, scenes=None, plots=True, verbose=True):
+def compare_scenes(results_root, scenes=None, plots=True, verbose=True, out_name="_comparison"):
     """Phenotyping across the scenes of a batch: a table of size-normalised descriptors of every scene, the
     z-scored distance matrix, hierarchical clustering and a 2-D MDS map (Results/_comparison/)."""
     from scipy.cluster.hierarchy import linkage, dendrogram
@@ -1034,7 +1034,7 @@ def compare_scenes(results_root, scenes=None, plots=True, verbose=True):
     rows = {k: v for k, v in rows.items() if v}
     if len(rows) < 2:
         return None
-    out = ensure_dir(root / "_comparison")
+    out = ensure_dir(root / out_name)
     tab = pd.DataFrame(rows).T
     tab.to_csv(out / "scene_features.csv")
     Z = tab.dropna(axis=1, how="any")

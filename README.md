@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/PyVista-latest-blue?style=flat-square" />
 </p>
 
-**PynamicMesh** turns a time-lapse of 3-D surfaces (one triangle mesh per time point, e.g. a segmented cell, an organ or an animal in motion) into a quantitative description of *how the shape moves and changes*. It finds which point of one frame corresponds to which point of the next, follows every point through time, measures how the surface stretches, bends, grows and changes its topology, extracts skeletons and protrusions, and reports everything as csv tables, plots, interactive 3-D viewers and GIF animations.
+**PynamicMesh** turns a time-lapse of 3-D surfaces (one triangle mesh per time point) into a quantitative description of *how the shape moves and changes*. It finds which point of one frame corresponds to which point of the next, follows every point through time, measures how the surface stretches, bends, grows and changes its topology, extracts skeletons and protrusions, and reports everything as csv tables, plots, interactive 3-D viewers and GIF animations.
 
 <center>
 <h1>⚠️Note⚠️</h1>
@@ -37,6 +37,8 @@
 | Flows, stretching, shape modes and moments of change? | [Dynamic Analysis](#dynamic-analysis) |
 | Which branch of the skeleton is born, retracts or reorganises, and when? | [Reeb Graph Dynamics](#reeb-graph-dynamics) |
 | How it moves vs deforms, where it grows, when things happen, its periods? | [Motion Analysis](#motion-analysis) |
+| Does it divide or fuse? Lineage, necks, division geometry, analyses per cell | [Topology Events](#topology-events) |
+| The results of the whole scene through its divisions and fusions (maps, material, analyses) | [Scene Assembly](#scene-assembly) |
 | The real time between frames (seconds, minutes) in the results? | [Time Between Frames](#time-between-frames) |
 | To look at the results or make GIFs | [Visualization & GIF Animations](#visualization) |
 | To run everything from a script, the command line or a YAML file | [Running the Pipeline](#running-the-pipeline) |
@@ -52,46 +54,61 @@ conda create -y -n PynamicMesh -c conda-forge python=3.11
 conda activate PynamicMesh
 ```
 
-Clone the repository and install it:
+Clone the repository:
 
 ```bash
 git clone https://github.com/MMV-Lab/PynamicMesh
+
+# Move into the project folder
 cd PynamicMesh
-
-# installation with CPU support only
-pip install .
-
-# installation with GPU support (choose the option that matches your CUDA / ROCm drivers)
-pip install ".[gpu-12x]"
-pip install ".[gpu-13x]"
-pip install ".[rocm-7-0]"
-
-# editable installation for developers
-pip install -e .
 ```
 
-Optional extras, combinable with the options above (e.g. `pip install ".[gpu-12x,spectral]"`):
-
-| extra | adds | used by |
-|---|---|---|
-| `spectral` | [`torch-harmonics`](https://github.com/NVIDIA/torch-harmonics) | GPU spherical harmonic transforms (high-degree SPHARM, spherical spectra); without it the same transforms run with NumPy |
-| `topology` | `ripser` | persistent homology of the [Dynamic Analysis](#dynamic-analysis); skipped with a message without it |
-| `all` | both | |
+## Only CPU 
+ 
+No GPU support on the pipeline computations.
 
 ```bash
-pip install ".[gpu-12x,all]"        # GPU + every optional analysis
+pip install -e ".[all]"
 ```
 
-**PyTorch with GPU support.** PyTorch is a dependency of the project and torch-harmonics uses the installed PyTorch as it is: on Linux the default `torch` wheel already supports CUDA, on **Windows the default wheel is CPU-only**. For GPU transforms on Windows (or a specific CUDA version), install PyTorch from the PyTorch index first, then the project:
+## GPU support:
+
+The project use GPU to paralelize and run heavy computation on available GPU.
+
+### Linux
+
+```bash
+# Choose the option that matches your CUDA (12/13) or ROCm drivers (7-0) 
+pip install ".[gpu-12x,all]"
+pip install ".[gpu-13x,all]"
+pip install ".[rocm-7-0,all]"
+```
+
+### Windows
+
+Install [PyTorch](https://pytorch.org/get-started/locally/) from the [PyTorch](https://pytorch.org/get-started/locally/) index first. 
+
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu126   # pick the index of your CUDA version on pytorch.org
-pip install ".[gpu-12x,spectral]"
 ```
 
-Check the installation with `python -c "import torch, torch_harmonics; print(torch.cuda.is_available())"`; after a run, `Parametrization/SPHARM_HD/hd_info.json` reports the backend (`torch` / `numpy`) and the device used.
+You can check the [PyTorch](https://pytorch.org/get-started/locally/) gpu support installation with: 
 
-Everything runs on the CPU; with a GPU (CuPy) the heavy dense algebra and the spectral nearest-neighbour searches are accelerated, and several GPUs can process several scenes at the same time (see [Compute Resources](#compute-resources)). 
+```bash
+python -c "import torch, torch_harmonics; print(torch.cuda.is_available())"
+```
+
+Then install the project:
+
+```bash
+# Choose the option that matches your CUDA (12/13) or ROCm drivers (7-0) 
+pip install ".[gpu-12x,all]"
+pip install ".[gpu-13x,all]"
+pip install ".[rocm-7-0,all]"
+```
+
+For detailed GPU/CPU usafe take  a look on [Compute Resources](#compute-resources). 
 </details>
 
 <details>
@@ -169,7 +186,8 @@ meshes ──┬── Global Geometry
          │                     └── Trajectories ──┬── Graph Animation (+ Reeb / Morse–Smale graphs)
          │                                        └── Dynamic Analysis (+ SPHARM coefficients)
          ├── Reeb Graphs ── time analysis, graph similarity
-         └── Morse–Smale Complex ── protrusions, critical-point graphs
+         ├── Morse–Smale Complex ── protrusions, critical-point graphs
+         └── Topology Events ── lineage tracks (whole pipeline per cell) ── Scene Assembly (whole-scene results)
 ```
 </details>
 
@@ -1206,6 +1224,12 @@ reeb_scalar="x" | reeb_scalar="y" | reeb_scalar="z"
 
 ```python 
 reeb_scalar="dist_centroid"
+```
+
+<b>Conformal factor of the uniformization (discrete surface Ricci flow):</b> the log of the local scaling that makes the surface uniformly curved (see <b>Topology Events</b>): intrinsic and scale-invariant; necks and saddle regions are the maxima of `ricci_conformal`, protrusions the maxima of `ricci_protrusion` (= minus the conformal factor). `ricci_method`: `'auto'` (Ricci flow, linearized when it does not converge), `'ricci'` or `'linear'`.
+
+```python 
+reeb_scalar="ricci_conformal" | reeb_scalar="ricci_protrusion"
 ```
 
 <b>Signed distance relative to parallel planes crossing the centroid:</b> 
@@ -2961,6 +2985,8 @@ visualize_reeb_dynamics(results_path, mesh_path=mesh_path)   # 'm': branches / +
     </td>
   </tr>
 </table>
+<img src="./assets/" style="max-width: 100%; height: auto; display: block; margin: 0 auto;"/>
+
 </details>
 </details>
 
@@ -3902,6 +3928,308 @@ Environment variables: `ACTIVE_SURFACE_NO_INTERRUPT=1` disables the keyboard wat
 </details>
 </details>
 
+<a id="topology-events"></a>
+<details>
+<summary><strong><span style="font-size:25px;">Topology Events: Divisions and Fusions</span></strong></summary>
+
+<details>
+<summary><span style="font-size:23px;">General Overview</span></summary>
+
+Most analyses of the pipeline need **one connected surface per frame**, followed through the whole sequence: functional maps, trajectories, parametrization and everything built on them are not defined when a surface divides (a cell becoming two) or two surfaces fuse. This stage detects such events and turns the sequence into a **lineage**: a tree whose branches (tracks) are single surfaces between two events.
+
+* every frame is analysed: number of pieces (from the mesh, from the solid, and the pieces about to separate), the **neck** (narrowest bottleneck) of every surface;
+* pieces of consecutive frames are matched: **divisions**, **fusions**, appearances, disappearances, and the **lineage tree**;
+* every division is analysed: the partition of the mother into its daughters, the **new membrane** (furrow), the orientation of the division (Hertwig's rule), volume and area ratios, and correspondences from every daughter back to the mother;
+* every fusion is analysed as the mirror of a division: the partition of the fused cell into its parents, the **bridge** (material that did not exist in the parents), volume and area changes;
+* the shape of every surface is followed with biomechanical descriptors (reduced volume, bending energy, Fiedler value, solidity), the thinning of every neck before a division is fitted by a **pinch-singularity** law that indicates its mechanism, and the whole sequence is read as a **space-time cobordism** in which every event is a critical point of time with a Morse index;
+* **lineage mode**: when the sequence changes topology (or holds several surfaces), **the whole pipeline runs on every track** (`Results/<scene>/TopologyEvents/Results/<track>/`) — functional maps, Reeb graphs, Morse–Smale complex, parametrization, trajectories, dynamic and motion analysis. The tracks are stages of one scene, so they are not compared with each other as independent scenes; tracks shorter than `min_track_frames` are set aside (`Lineage_meshes_short/`). Single-surface sequences are processed exactly as before (the stage only adds its outputs);
+* **scene assembly**: from the tracks and the events, the results of the **whole scene** are rebuilt in the usual folders of `Results/<scene>/`, so a scene that divides and fuses is read, plotted and animated like any other scene — see [Scene Assembly](#scene-assembly).
+
+<!-- add figure/gif here: lineage viewer (surfaces by track, necks, mother partition + new membrane) and the lineage tree -->
+
+</details>
+
+<details>
+<summary><span style="font-size:23px;">Mathematical Construction Details</span></summary>
+
+**Pieces of a frame.** Three counts: (i) connected components of the mesh; (ii) components of the **solid** — the surface is rasterized on one voxel grid common to all frames and its interior filled, an inside/outside classification from the geometry only (Müller 2009; components labelled by a breadth-first search in the spirit of Qu & Li 1996), independent of the mesh connectivity; (iii) components of the solid eroded by one voxel, which breaks thin bridges (pieces about to separate). Pieces smaller than `min_volume_fraction` of the frame are ignored.
+
+**Necks.** The narrowest bottleneck of every surface is found by a **spectral sweep cut**: the vertices are sorted by the Fiedler vector of the mesh graph (weights $1/\ell_{ij}$) and the prefix of minimal conductance $\phi = \text{cut}/\min(\text{vol}, \text{vol}^c)$ is kept (Cheeger) — the cut through the thinnest part of the surface. The cut is an iso-line of the Fiedler vector, interpolated along the edges, so its length is exact; the neck radius is $r_n = L/2\pi$ and the **neck ratio** $r_n / (\sqrt 2\, r_{eq})$, with $r_{eq}$ the equivalent radius of the smaller part, is $\approx 1$ for a round surface and $\to 0$ when the neck closes. Option `neck_method='ricci'` uses **Ricci flow** on the mesh graph instead (GraphRicciCurvature, Ni et al. 2019): the flow stretches the edges across a bottleneck and the graph is cut there into its two communities (computed on a coarsened graph; slower, used as a cross-check).
+
+**Conformal neck index (surface Ricci flow).** Every surface is also uniformized by **discrete surface Ricci flow** (vertex scaling: $l_{ij} = l^0_{ij}\, e^{(u_i+u_j)/2}$, target curvature $\bar K_i = 2\pi\chi A_i/A$; Luo 2004), solved by Newton's method on the convex Ricci energy whose Hessian is half the cotangent Laplacian. Following Wei et al. (2025) every step is written as array operations on the whole mesh — edge lengths, corner angles, angle-deficit curvatures, sparse Hessian — so it runs on the GPU (CuPy, conjugate gradients) and scales to high-resolution meshes (about 2 s for 40 000 vertices on a CPU); degenerate triangles are handled by the extended convex energy (Bobenko, Pinkall & Springborn 2015). The flow runs on a manifold copy of the surface (pinch vertices and non-manifold edges split, tiny pockets left by exporters dropped — the mesh itself is not modified), every piece separately; when it does not converge (very irregular meshes) the linearized problem $L u = \bar K - K$ is used (the conformal factor of Ben-Chen & Gotsman 2008), and the method used is recorded. The result is the **conformal factor** $u$: positive (dilated) at necks and saddle regions, negative (shrunk) on protrusions. The **conformal neck index** — mean $u$ on the neck minus the median $u$ of the surface — rises as a neck closes (0 → 0.43 on a test division while the neck ratio falls 1.07 → 0.67), an intrinsic complement of the neck ratio.
+
+**Pinches.** A surface whose neck ratio falls below `pinch_ratio` — two cells still held together by a vertex or a thin thread — is split into its two parts before tracking (both parts must hold at least `min_part_fraction` of the area, so thin tips with a pinched vertex are never split), and the division is dated at the pinch.
+
+**Tracking and lineage.** Pieces of consecutive frames are linked by the overlap of their solids on the common grid, relative to the smaller piece (a bincount of the paired voxel labels, on the GPU when available); a piece without overlap is linked to the nearest piece within twice its size (a daughter that moved out of the mother's volume). One piece with several children **divides**, several pieces with one child **fuse**.
+
+**Divisions.** The mother solid (last frame before the split) is partitioned by nearest daughter (distance transform with indices on the grid) and every part is closed by marching cubes into a **virtual daughter**: the mother's material that becomes each daughter. This gives the partition of the mother surface, the **new membrane** (surface of a virtual daughter with no mother counterpart: the furrow), the angle between the daughters' axis and the mother's long axis (Hertwig's rule: about 0°), the volume ratio, the volume conservation $\sum V_d / V_m$ and the new area $(\sum A_d - A_m)/A_m$. Each daughter is mapped to its virtual daughter by a functional map (or nearest points), and the virtual daughter to the mother, so every daughter vertex knows the mother vertex it comes from (or that it is new membrane) — the label-preserving view of topology changes of Heiss-Synak et al. 2024.
+
+**Fusions.** The mirror of a division: the fused solid (first frame after the fusion) is partitioned by nearest parent (distance transform with indices on the grid), and every vertex of the fused surface gets its parent and the nearest vertex of that parent. Vertices whose distance to the parents is an outlier of the frame — beyond the median + 4 MAD of the distances, and at least 1.5 voxels, because the parents are one frame earlier and the whole surface has moved a little — form the **bridge**: material that did not exist in the parents. This gives the volume ratio of the parents, the volume conservation, the area change, the bridge fraction and the angle between the parents' axis and the long axis of the fused cell.
+
+**Surface biomechanics.** Every surface of every frame gets four scale-free descriptors (discrete differential geometry, cotangent Laplacian): the normalized **Fiedler value** $\lambda_1 A / 8\pi$ (1 for a sphere, $\to 0$ when a bottleneck forms — Cheeger's inequality — independently of where the cut is); the **reduced volume** $v = V / V_{\text{sphere}}(A)$ (1 for a sphere, $1/\sqrt 2$ for two touching equal spheres — the control parameter of vesicle shape transitions, Seifert 1997); the Helfrich **bending energy** $\int (2H)^2\, dA / 16\pi$ (1 for a sphere, 2 for two spheres: it rises towards a division); and the **solidity** $V / V_{\text{hull}}$ (falls as a furrow forms).
+
+**Space-time cobordism.** Seen in space-time, the sequence is a cobordism between its first and last surfaces, and time is a Morse function on it: every change of the surfaces is a critical point of time with a Morse index — 0 (a sphere is born), 1 (a 1-handle: a bridge between two surfaces, i.e. a **fusion**, or a new tunnel), 2 (a 2-handle: a neck pinch, i.e. a **division**, or a tunnel closing) or 3 (a sphere disappears). The changes of the number of surfaces $\Delta\beta_0$ and of the Euler characteristic $\Delta\chi$ between frames give the indices, which are checked with the Euler–Poincaré balance $\Delta\chi = 2\,(n_0 - n_1 + n_2 - n_3)$.
+
+**Neck-pinch singularity.** Before every division, the neck radius of the mother is fitted as $r(t) = c\,(T - t)^{\alpha}$, with the pinch time $T$ searched between the last frame before the split and the split. The exponent indicates the mechanism of the thinning: $\alpha \approx 1/2$ curvature-driven (mean curvature flow, surface tension; Huisken; Angenent & Velázquez), $\approx 2/3$ inertial–capillary, $\approx 1$ viscous (Stokes) pinch-off (Eggers 1997), $\approx 1/4$ surface diffusion. The closest regime, the predicted pinch time and the quality of the fit ($R^2$) are reported.
+
+</details>
+
+<details>
+<summary><span style="font-size:23px;">Parameters</span></summary>
+
+```python
+run_pipeline(path_str, compute_topology_events=True, lineage_mode='auto', topology_params={...})
+```
+
+`compute_topology_events` (default `True`) runs the stage; `lineage_mode` (`'auto'`, `True`, `False` = detection only) decides whether the pipeline runs per track.
+
+| key | default | meaning |
+|---|---|---|
+| `voxels` | `96` | voxels along the longest side of the global grid |
+| `min_volume_fraction` | `0.01` | smaller solid pieces are ignored |
+| `erode` | `1` | erosion (voxels) for the pieces about to separate |
+| `neck_method` | `'spectral'` | `'spectral'` (Fiedler sweep cut) or `'ricci'` (Ricci flow, needs GraphRicciCurvature) |
+| `neck_threshold` | `0.5` | neck ratio below which a surface is reported as constricted |
+| `split_pinched` | `True` | split surfaces pinched at their neck before tracking |
+| `pinch_ratio` | `0.08` | neck ratio of a pinch |
+| `min_part_fraction` | `0.15` | both parts of a pinch must hold this fraction of the area |
+| `conformal_index` | `True` | conformal factor of every surface (surface Ricci flow) and conformal neck index |
+| `conformal_method` | `'auto'` | `'auto'` (Ricci flow, linearized when it does not converge), `'ricci'`, `'linear'` |
+| `ricci_nodes`, `ricci_iterations` | `600`, `10` | `neck_method='ricci'` (graph Ricci flow): size of the coarsened graph, iterations |
+| `match_min_overlap` | `0.05` | overlap of the solids linking two pieces |
+| `lineage` | `'auto'` | same as `lineage_mode` |
+| `min_track_frames` | `3` | shortest track analysed by the lineage pipeline |
+| `division_maps` | `'fm'` | daughter → mother correspondences: functional map or nearest points (`'nn'`) |
+| `scene_assembly` | `True` | in lineage mode, rebuild the results of the whole scene from the tracks ([Scene Assembly](#scene-assembly)) |
+| `scene_maps` | `'auto'` | scene correspondences inside a track: `'auto'` (the track's point map, nearest points where it is a symmetric flip), `'fm'` (always the track's map), `'nearest'` |
+| `plots` | `True` | write the plots |
+
+Optional dependencies: `scikit-image` (marching cubes of the virtual daughters) and `GraphRicciCurvature` (Ricci-flow necks): `pip install scikit-image GraphRicciCurvature`.
+
+</details>
+
+<details>
+<summary><span style="font-size:23px;">Results</span></summary>
+
+`Results/<scene>/TopologyEvents/`:
+
+* `topology_timeline.csv` — per frame: mesh, solid and separating components, pinches split, pieces tracked, events;
+* `components.csv` — every piece of every frame: track, vertices, area, volume, centroid;
+* `transitions.csv` — divisions, fusions, appearances, disappearances (frame, time, parent and child tracks);
+* `lineage.csv` — every track: parents, children, first / last frame and time, fate (`divided`, `fused`, `disappeared`, `ongoing`);
+* `necks.csv` — per frame and track: neck radius, neck ratio, position along the long axis (0–1), centre and plane of the cut, `constricted`, `conformal_neck_index` and `conformal_method`;
+* `conformal_factor.npz` — the conformal factor of every vertex in every frame;
+* `divisions.csv` and `Divisions/division_<k>/` — the geometry of every division and `mother_partition.npy` (daughter of every mother vertex), `virtual_daughter_<i>.npz` (mesh, new-membrane mask, mother vertex of every vertex), `daughter_<i>_to_mother.npy` (mother vertex of every daughter vertex, −1 = new membrane);
+* `fusions.csv` and `Fusions/fusion_<k>/` — the geometry of every fusion (parents' volume ratio, volume conservation, area change, bridge fraction, parents' axis vs long axis) and `child_partition.npy` (parent of every fused vertex), `child_to_parent.npy` (parent vertex of every fused vertex, −1 = bridge);
+* `surfaces.csv` — per frame and track: area, volume, reduced volume, normalized Fiedler value, bending energy, solidity;
+* `cobordism.csv` — per frame: $\Delta\beta_0$, $\Delta\chi$, $\Delta$genus, the number of critical points of every Morse index, the Euler–Poincaré check and the surgery;
+* `pinch_singularity.csv` — per division: fitted exponent $\alpha$, predicted and observed pinch times, $R^2$, closest regime;
+* `Lineage_meshes/<scene>_track<k>/` — every track as a single-surface mesh sequence (with its frame times), and in lineage mode `Results/<scene>_track<k>/` (the whole pipeline per track, inside `TopologyEvents/Results/`);
+* `plots/` — `1_topology_timeline.png` (pieces per frame, events), `2_lineage_tree.png`, `3_necks.png` (neck ratio and conformal neck index of every surface over time), `4_divisions.png` (ratios and Hertwig angle of every division), `5_shape_biomechanics.png` (the surface descriptors of every track), `6_pinch_singularity.png` (neck radius vs time to pinch, log–log, with the fitted law);
+* in lineage mode the [scene assembly](#scene-assembly) adds `Lineage_tracking/`, `Graph_surgery/`, `center_lineage.csv`, `scene_assembly.json` and `plots/7_material.png`;
+* `summary.json`, `grid.npz`, `vertex_labels.npz` (piece of every vertex in every frame).
+
+How to read them: the neck ratio of a cell falls towards 0 before it divides (its slope is the speed of the furrow, its position whether the division is central or asymmetric); a Hertwig angle near 0° means the cell divides across its long axis; a volume ratio far from 1 is an asymmetric division; the new membrane fraction is the share of each daughter's surface that was not part of the mother. Before a division the reduced volume falls towards $1/\sqrt 2$, the bending energy rises towards 2 and the Fiedler value and solidity fall; after a fusion they relax back as the cell rounds up. The bridge fraction of a fusion is the share of the fused surface that is new material. A fitted pinch exponent close to 1/2 points to a curvature-driven (surface-tension) constriction, close to 1 to a viscous one; a low $R^2$ means too few frames before the split to tell.
+
+Viewer (`m` changes the view: lineage / necks / divisions / conformal factor — warm = necks, cold = protrusions):
+```python
+from PynamicMesh.utils.dynamics_visualizers import visualize_lineage
+visualize_lineage(results_path, mesh_path=mesh_path)
+```
+
+</details>
+</details>
+
+<a id="scene-assembly"></a>
+<details>
+<summary><strong><span style="font-size:25px;">Scene Assembly: Whole-Scene Results Through Divisions and Fusions</span></strong></summary>
+
+<details>
+<summary><span style="font-size:23px;">General Overview</span></summary>
+
+In [lineage mode](#topology-events) every cell is analysed on its own, between two topology events, where all the analyses of the pipeline are well defined. The scene assembly builds, from these per-cell results and the topology events, the results of the **whole scene** in the usual folders of `Results/<scene>/` — the same files, tables, plots, viewers and GIF animations as a single-surface scene — so a scene that divides and fuses is read exactly like a continuous one:
+
+* the **correspondences and functional maps** of the whole scene, in which a division or a fusion appears as a map between cell blocks;
+* the **physical fields, Reeb graphs, Morse–Smale complexes and graph analyses** of every frame, all the cells together;
+* the **material of the scene followed through the events**: a particle system on the surfaces whose trajectories, viewers and animations split at a division and merge at a fusion, with every particle's cell, birth and death;
+* the **Lagrangian analyses** — [Dynamic Analysis](#dynamic-analysis), [Motion Analysis](#motion-analysis), [Reeb Graph Dynamics](#reeb-graph-dynamics) — of every cell transferred onto the scene particles, and the tables of the cells combined into **scene tables** according to the meaning of every quantity (totals are summed, means are weighted by area, maxima stay maxima …).
+
+The principle throughout is that nothing is computed across a surgery where it is not defined: a stretching rate, a strain or a flow needs a surface whose connectivity does not change, so these quantities are computed per cell and the scene shows every cell with its own values, the event frames being flagged. Single-surface scenes are not affected.
+
+<!-- add figure/gif here: scene particles splitting and merging (comet trails), a block heat map of a division, the Reeb graph animation splitting into the daughters -->
+
+</details>
+
+<details>
+<summary><span style="font-size:23px;">Mathematical Construction Details</span></summary>
+
+**Scene correspondences.** For every frame $k \geqslant 1$ every vertex of the frame gets its vertex in frame $k-1$. Inside a cell this is the cell's own functional-map point map; with `scene_maps='auto'` the nearest points are used where that map moves the points more than twice as far as the nearest-point map (a symmetric flip: the frames are aligned and move little between frames). Across a division or a fusion the daughter → mother and fused → parent maps of the topology events are used. Vertices without a counterpart (new membrane, bridge) are **new material** ($-1$, listed in `NEW_T####.npy`) and are matched to their nearest previous point where a complete map is needed.
+
+**Scene functional maps (direct sums).** The Laplace–Beltrami spectrum of a frame made of several surfaces is the union of the spectra of its surfaces (the zero eigenvalue repeats once per surface), so the eigenbasis of the frame is the **direct sum** of the eigenbases of its cells, and a functional map between two frames is a block matrix — one row block per cell after the transition, one column block per cell before:
+
+| transition | cells before → after | matrix |
+|---|---|---|
+| inside a cell | 1 → 1 | one $K \times K$ block |
+| division | 1 → 2 | $2K \times K$: the mother's modes redistributed into each daughter (blocks stacked) |
+| two cells | 2 → 2 | $2K \times 2K$, block diagonal: each cell maps to itself |
+| fusion | 2 → 1 | $K \times 2K$: both parents' modes go into the fused cell (blocks side by side) |
+
+The whole scene uses one basis size $K$ (the largest reached by the cells' maps): a cell's own map of that size is used unchanged, while smaller maps (refined by ICP, which keeps the initial size) and the event blocks are computed at full size by the pull-back of the point correspondence $\Pi$,
+$$C = \Phi_k^\top M_k\, \Pi\, \Phi_{k-1},$$
+so every transition has the same resolution. The heat maps mark the cell blocks and name the event. The diagonal metrics (inertia, decay) are defined on square blocks: the scene value is the mean of the block metrics weighted by the energy $\lVert C_b\rVert_F^2$ of every block — with a single block it is the plain metric of a continuous scene.
+
+**Material through the events (scene particles).** The material of the first frame is followed by a particle system living on the surfaces — the explicit, Lagrangian view of the surface (as in explicit surface tracking), with a **lifecycle** so that material can be created, annihilated and handed over at the events:
+
+* *advection*: at every frame each particle moves by the displacement field observed between the frames ($V_k[u] - V_{k-1}[\text{map}(u)]$ at the mapped vertices, inverse-distance weighted over its 8 nearest mapped points) and is **projected on the closest point** of the new surface, so it never leaves the surface nor collapses onto vertices; its cell is the cell of the triangle it lands on;
+* *tangential relaxation*: two passes of Laplacian smoothing over the faces that are not cut, each followed by the projection — the particles are redistributed along the surface only, which keeps the material mesh regular;
+* *lifecycle*: a particle whose nearest mapped point is farther than 2.5 median edge lengths **dies** (material annihilated, e.g. the contact surfaces of a fusion); the new-material vertices of the maps give birth to new particles; a face whose particles died or ended in different cells is **cut, permanently** (a surgery is not undone); a hole left by dying material is closed by a disk cap;
+* *remesh-and-transfer at the events*: a Lagrangian mesh cannot represent a topology change without rebuilding, so at a division or a fusion the particles of the parent cells end and every child cell is **re-seeded from its own frame surface** (one particle per vertex, its triangles) — the standard treatment of topology changes in explicit surface tracking (local remeshing with attribute transfer);
+* *adaptive remeshing*: the material mesh of every cell is compared with the cell's real surface at every frame; a cell is re-seeded when a material face lies farther than 1.5 median edges from the surface (a fold or sheet through the interior, e.g. a waist that widens after a fusion much faster than the material can follow) or more than 1 % of its faces drift beyond 0.75 edges — cells whose material stays faithful are never touched;
+* *anchoring*: before its birth a particle follows the nearest particle of the previous frame, and after its death the nearest surviving (or re-seeded) particle, so every trajectory is continuous through the events and a particle that is not alive always coincides with real material; particles that are never alive are removed;
+* every birth and death is classified as **material** (created / annihilated material) or **remesh** (numerical re-seeding), so the particle statistics are never mistaken for biological events.
+
+The sub-frame interpolation uses the schemes configured for the [trajectories](#trajectories) on these positions; the cut faces switch at the middle of an event interval, so a division is seen to split and a fusion to merge in every animation, and every viewer hides the cut faces and the particles that are not alive.
+
+**Graphs through the events.** The Reeb graph of a disjoint union of surfaces is the disjoint union of their Reeb graphs, so the graph of a frame joins the graphs of its cells (likewise the Morse–Smale critical-point graphs, with the centre of every surface placed in its own piece and one convex hull per surface); the graph surgery of every event (nodes cut at a division, joined at a fusion) is tabulated. In the [graph animation](#graph-animation) the nodes of the animated graph are anchored to sets of surface particles (a level-set component, a vertex set): a node whose anchor set is shared by several cells **splits** into one node per cell, at the weighted centroid of its particles in that cell, edges are kept within each cell, and the nodes merge back when the cells fuse — the graph divides and fuses with the surface. The reports of the Morse–Smale stage (critical points, protrusions, region tracking) are computed on the scene complexes.
+
+**Lagrangian analyses (transfer).** The Lagrangian analyses need a fixed connectivity, which holds within a cell: they are computed per cell and **transferred** onto the scene particles — every particle takes the value of the nearest vertex of its own cell's tracked mesh (face values: the nearest face, by centroid), and the files are renumbered on the scene timeline. A transition through a surgery is not defined by any cell. For a continuous display, the values exist on the **existing** elements only (particles alive, faces not cut): an existing element without a value takes its own value at the nearest frame that has one, or else the value of the nearest element in space at the nearest frame with values; elements that do not exist stay empty, so nothing is drawn in the gap between two daughters. **Cumulative quantities** (cumulative growth, area change, deformation displacement) are accumulated along the lineage: each cell accumulates from its birth, and its material inherits what the parent's material had accumulated (re-seeded particles of the same cell inherit their cell's accumulation), so they are continuous through every event. The times of the cells' tables are converted from each cell's local clock to the scene time.
+
+**Scene tables.** A per-frame table of the cells becomes one scene value per frame according to the meaning of every column:
+
+| column | scene value | examples |
+|---|---|---|
+| totals: counts, energies, areas, volumes | sum over the cells | `E_tangential`, `n_regions` |
+| means, fractions, ratios, rates | mean weighted by the cell areas | `mean_speed`, `frac_curl_free` |
+| maxima, peaks, percentiles | maximum (upper bound for a percentile) | `max_divergence`, `ftle_p95` |
+| minima, confidences | minimum (the least reliable cell) | `confidence` |
+
+Tables that cannot be combined stay **one row per cell**: per-cell descriptors (rigid motion, polarity, shape modes, MDS embeddings, ShapeDNA spectra — every cell has its own axes and modes), tables keyed by another object (regions, branches, modes, degrees, fields) and tables without a frame column. The conventional confidence of a cell's first frame is not used at the frames of the events. Every table also exists per cell (`cells_<table>.csv`), and the plots show one curve per tracked object (cell, region, branch …) with the scene value dashed, labelled with its rule and broken at every division and fusion — quantities measured from a cell's own first frame (strain, anisotropy, stretch) restart there.
+
+</details>
+
+<details>
+<summary><span style="font-size:23px;">Parameters</span></summary>
+
+The assembly runs at the end of lineage mode and assembles every stage computed for the tracks (the usual pipeline flags: `compute_trajectories`, `compute_dynamic_analysis`, `compute_motion_analysis`, `compute_reeb_dynamics`, `compute_graph_animation`, `compute_physic_fields` …) with their own parameters — e.g. the interpolation schemes of `traj_params` and the model of `graph_animation_params`:
+
+```python
+run_pipeline(path_str, compute_topology_events=True, lineage_mode='auto',
+             topology_params={'scene_assembly': True, 'scene_maps': 'auto'}, ...)
+```
+
+| key (`topology_params`) | default | meaning |
+|---|---|---|
+| `scene_assembly` | `True` | build the results of the whole scene after the tracks |
+| `scene_maps` | `'auto'` | correspondences inside a cell: `'auto'` (track map, nearest points where it is flipped), `'fm'`, `'nearest'` |
+
+Advanced options of the material and of the transfer, also given in `topology_params` (`Topology_Events/topology_params` in `config.yaml`):
+
+| option | default | meaning |
+|---|---|---|
+| `event_remesh` | `True` | re-seed the children of a division / fusion from their own surfaces |
+| `adaptive_remesh` | `True` | re-seed a cell whose material leaves its surface |
+| `fold_tol`, `drift_tol`, `drift_share` | `1.5`, `0.75`, `0.01` | re-seeding thresholds (median edge lengths; share of faces) |
+| `k_nn`, `relax`, `death_factor` | `8`, `2`, `2.5` | advection neighbours, relaxation passes, death distance (median edges) |
+| `hold` | `True` | continuous display of the transferred values (existing elements only) |
+
+The assembly can also be run on its own on finished lineage results:
+
+```python
+from PynamicMesh.core.lineage_assembly import assemble_scene
+assemble_scene('Results/<scene>', 'path/to/meshes/<scene>', params=pipeline_params)
+```
+
+</details>
+
+<details>
+<summary><span style="font-size:23px;">Results</span></summary>
+
+The usual folders of `Results/<scene>/`, readable with the usual viewers and GIF stages, plus:
+
+* `Transform_Matrices/` — scene point maps `FMV_T####_T####.npy`, new material `NEW_T####.npy`, scene functional maps `FMC_T####_T####.npy`, `scene_fm_blocks.json` (the cell blocks of every map) and `scene_map_sources.csv` (which map was used for every cell and frame);
+* `Diagonal_analysis/` — block heat maps and their animation, `Diagonal_Metrics.csv` (with `Event` and `N_blocks`), `Diagonal_Metrics_blocks.csv` (the metrics of every block);
+* `Physical_fields/` — the physical fields of the scene with `new_material` and `track` per vertex; `from_trajectories/` transferred from the cells;
+* `Reeb_Graphs/`, `MSComplexAnalysis/`, `Graph_analysis/` — the graphs of all the cells of every frame, the Morse–Smale reports and region tracking, the graph analyses;
+* `Trajectories/` — `trajectories.npy` (continuous, anchored positions), `trajectories_lifecycle.npy` (positions while alive), `material_cell.npy` (cell of every particle in every frame, −1 = not alive), `particle_birth.npy` / `particle_death.npy` and their kinds (`material` / `remesh`), `cut_faces.npy`, `interpolation/` (configured schemes + sub-frame cut faces), `displacements/`, `kinematics/`, `tracking.csv` (alive, born and died per frame, material vs remesh), `plots/scene_particles.png`;
+* `GraphAnimation/` — the animated graphs, with the node anchors used to split and merge them;
+* `DynamicAnalysis/`, `MotionAnalysis/`, `ReebDynamics/` — the transferred per-frame files, the scene tables (combined, `n_cells`) and `cells_<table>.csv`, the cells' static results in `cells/cell_XX/` (with their own plots), `transfer_log.txt` (how every file and every column was transferred or combined) and `plots/scene_<table>.png`;
+* `Parametrization/` — the cells' sphere maps and SPHARM reconstructions placed in the scene, and `scene_<table>.csv`;
+* `TopologyEvents/` — `Lineage_tracking/` (material origin and age of every vertex, `material_summary.csv`: original and new material fractions, mean material age, coherence), `Graph_surgery/` (nodes cut and joined at every event), `center_lineage.csv` (the centre of every cell over time), `scene_assembly.json` (status of every assembled stage) and `plots/7_material.png`.
+
+How to read them: within one cell the scene results equal that cell's own results; at a division the heat map shows one staircase per daughter and at a fusion one per parent; the scene particles plot separates material created or annihilated (green / red) from re-seeding (grey, numerical); a dashed scene curve sums or averages the cells according to its label and stops at every event.
+
+Viewers: every viewer of the pipeline works on the assembled scene (cut faces hidden, only the particles alive drawn); the whole-scene viewer shows the cells, the material origin and age, the speed and the graphs of all the cells:
+```python
+from PynamicMesh.utils.dynamics_visualizers import visualize_scene
+visualize_scene(results_path, mesh_path)
+```
+
+<table>
+  <!-- ROW 1 -->
+  <tr>
+    <td align="center">
+      <img src="./assets/mesh_sequence.gif" width="100%" height="100%" /><br />
+    </td>
+    <td align="center">
+      <img src="./assets/scene_cells_lineage_tracks.gif" width="100%" height="100%" /><br />
+    </td>
+    <td align="center">
+      <img src="./assets/scene_material_age.gif" width="100%" height="100%" /><br />
+    </td>
+    <td align="center">
+      <img src="./assets/scene_material_origin.gif" width="100%" height="100%" /><br />
+    </td>
+  </tr>
+</table>
+
+<table>
+  <!-- ROW 1 -->
+  <tr>
+    <td align="center">
+      <img src="./assets/ftle.gif" width="100%" height="100%" /><br />
+    </td>
+    <td align="center">
+      <img src="./assets/hodge_curl_free_grad_sources_sinks.gif" width="100%" height="100%" /><br />
+    </td>
+    <td align="center">
+      <img src="./assets/hodge_curl_free_grad_sources_sinks_vectors.gif" width="100%" height="100%" /><br />
+    </td>
+    <td align="center">
+      <img src="./assets/mscomplex_T0000_bspline_skeleton_on_the_moving_surface.gif" width="100%" height="100%" /><br />
+    </td>
+  </tr>
+  <!-- ROW 2 -->
+  <tr>
+    <td align="center">
+      <img src="./assets/dynamic_trajectories_particles_comet_trails.gif" width="100%" height="100%" /><br />
+    </td>
+    <td align="center">
+      <img src="./assets/dynamic_trajectories_trajectory_history.gif" width="100%" height="100%" /><br />
+    </td>
+    <td align="center">
+      <img src="./assets/dynamic_trajectories_vectors.gif" width="100%" height="100%" /><br />
+    </td>
+    <td align="center">
+      <img src="./assets/interp_bspline.gif" width="100%" height="100%" /><br />
+    </td>
+  </tr>
+</table>
+
+<table>
+  <!-- ROW 1 -->
+  <tr>
+    <td align="center">
+      <img src="./assets/ms_protrusions.gif" width="70%" height="70%" /><br />
+    </td>
+    <td align="center">
+      <img src="./assets/parametrization.gif" width="100%" height="100%" /><br />
+    </td>
+  </tr>
+</table>
+
+</details>
+</details>
+
 <a id="time-between-frames"></a>
 <details>
 <summary><strong><span style="font-size:25px;">Time Between Frames</span></strong></summary>
@@ -3956,6 +4284,7 @@ Every stage has an interactive 3-D viewer that reads the stored results (no reco
 | graph animation | `dynamics_visualizers.visualize_graph_animation(results_path, ...)` |
 | dynamic analysis | `dynamics_visualizers.visualize_hodge / visualize_ftle / visualize_shape_modes` |
 | Reeb graph dynamics | `dynamics_visualizers.visualize_reeb_dynamics(results_path, mesh_path=...)` |
+| topology events (lineage, necks, divisions) | `dynamics_visualizers.visualize_lineage(results_path, mesh_path)` |
 | motion analysis | `dynamics_visualizers.visualize_motion_analysis(results_path, mesh_path=...)` |
 | physical fields: frame-to-frame vs tracked mesh | `dynamics_visualizers.visualize_field_comparison(results_path, mesh_path=...)` |
 
@@ -3986,7 +4315,7 @@ from PynamicMesh.utils.gif_export import export_gifs
 export_gifs('./Mesh_models')                                       # every scene, every stage with results
 export_gifs('./Mesh_models/scene1', stages=['reeb', 'trajectories'])
 ```
-Stages: `'basic_geometry'`, `'physics'`, `'reeb'`, `'ms_complex'`, `'parametrization'`, `'trajectories'`, `'graph_animation'`, `'dynamic_analysis'`, `'motion_analysis'`, `'reeb_dynamics'`.
+Stages: `'basic_geometry'`, `'physics'`, `'reeb'`, `'ms_complex'`, `'parametrization'`, `'trajectories'`, `'graph_animation'`, `'dynamic_analysis'`, `'motion_analysis'`, `'reeb_dynamics'`, `'topology_events'`.
 
 **3. From a viewer, with your own view**: rotate and zoom, choose the mode and options, then press **space**. The whole sequence is recorded with exactly that camera and those settings and saved as `screenshot_<n>.gif` (never overwriting earlier captures or the pipeline GIFs); the viewer then returns to the frame you were on.
 
@@ -4039,6 +4368,7 @@ Sections of the YAML and the `run_pipeline` parameters they hold:
 | `Dynamic_Analysis` | `compute_dynamic_analysis`, `dyn_analysis_params` |
 | `Frame_Times` | the keys of `time_params` |
 | `Reeb_Dynamics` | `compute_reeb_dynamics`, `reeb_dynamics_params` |
+| `Topology_Events` | `compute_topology_events`, `topology_params` (incl. `lineage`) |
 | `Motion_Analysis` | `compute_motion_analysis`, `motion_params` |
 | `GIF` | `gif`, `gif_params` |
 
@@ -4112,12 +4442,15 @@ Results/<scene>/
 ├── GraphAnimation/          <graph>_T<frame>_<model>/, comparisons
 ├── DynamicAnalysis/         Hodge/, Hodge_nonrigid/, FTLE/, ShapeSpace/, SphericalSpectra/, ReducedCoordinates/, ChangePoints/, Topology/, report.md
 ├── ReebDynamics/            events.csv, tracks.csv, paths.csv, samples.csv, summary.json, plots/
+├── TopologyEvents/          topology_timeline.csv, lineage.csv, necks.csv, divisions.csv, fusions.csv, surfaces.csv, cobordism.csv,
+│                            pinch_singularity.csv, Divisions/, Fusions/, Lineage_meshes/, Results/<track>/ (lineage mode),
+│                            Lineage_tracking/, Graph_surgery/, scene_assembly.json (scene assembly), plots/
 └── MotionAnalysis/          Confidence/, RigidMotion/, GrowthAtlas/, Anisotropy/, Polarity/, Regions/, Protrusions/, Branches/, Signals/, summary.json
 
 Results/_comparison/         scene_features.csv, scene_distance.csv, scene_comparison.png (two or more scenes)
 ```
 
-Every stage folder may also contain `gif/` (GIF animations) and `screenshots/` (viewer screenshots).
+Every stage folder may also contain `gif/` (GIF animations) and `screenshots/` (viewer screenshots). For a scene that divides or fuses, the [scene assembly](#scene-assembly) fills these same folders for the whole scene and adds per-cell files (`cells_<table>.csv`, `cells/cell_XX/`, `transfer_log.txt`).
 
 </details>
 
@@ -4176,6 +4509,24 @@ Would you like to go deep on the bases and fundaments of the project?
 
 [Time-varying Reeb graphs for continuous space–time data](https://doi.org/10.1016/j.comgeo.2007.11.001) By Herbert Edelsbrunner, John Harer, Ajith Mascarenhas, Valerio Pascucci, Jack Snoeyink.
 
+[Fast and robust tracking of fluid surfaces](https://doi.org/10.1145/1599470.1599476) By Matthias Müller.
+
+[Multi-material mesh-based surface tracking with implicit topology changes](https://doi.org/10.1145/3658223) By Peter Heiss-Synak, Aleksei Kalinov, Malina Strugaru, Arian Etemadi, Huidong Yang, Chris Wojtan.
+
+[A 3D surface tracking algorithm](https://doi.org/10.1006/cviu.1996.0050) By Xiaoqing Qu and Xiaobo Li.
+
+[Community detection on networks with Ricci flow](https://doi.org/10.1038/s41598-019-46380-9) By Chien-Chun Ni, Yu-Yao Lin, Feng Luo, Jie Gao.
+
+[GPU-accelerated optimization of discrete Ricci flow for high-resolution triangular meshes](https://doi.org/10.1049/ipr2.70237) By Zhiheng Wei, Kun Qian, Yinghua Li, Siyuan Li, Jialing Zhang, Junrong Song, Ming Yang, Ming Ni.
+
+[Combinatorial Yamabe flow on surfaces](https://doi.org/10.1142/S0219199704001501) By Feng Luo.
+
+[Discrete conformal maps and ideal hyperbolic polyhedra](https://doi.org/10.2140/gt.2015.19.2155) By Alexander I. Bobenko, Ulrich Pinkall, Boris A. Springborn.
+
+[Characterizing shape using conformal factors](https://doi.org/10.2312/3DOR/3DOR08/001-008) By Mirela Ben-Chen and Craig Gotsman.
+
+[Free-form design of discrete architectural surfaces by use of circle packing](https://arxiv.org/abs/2103.07584) By Shizuo Kaji and Jingyao Zhang ([ricci_flow](https://github.com/shizuo-kaji/ricci_flow)).
+
 [Dynamic mode decomposition of numerical and experimental data](https://doi.org/10.1017/S0022112010001217) By Peter J. Schmid.
 
 [Chaos as an intermittently forced linear system](https://doi.org/10.1038/s41467-017-00030-8) (time-delay embedding of DMD) By Steven L. Brunton, Bingni W. Brunton, Joshua L. Proctor, Eurika Kaiser, J. Nathan Kutz.
@@ -4185,5 +4536,13 @@ Would you like to go deep on the bases and fundaments of the project?
 [A solution for the best rotation to relate two sets of vectors](https://doi.org/10.1107/S0567739476001873) By Wolfgang Kabsch.
 
 [Optimal detection of changepoints with a linear computational cost](https://www.tandfonline.com/doi/abs/10.1080/01621459.2012.737745) By Rebecca Killick, Paul Fearnhead, Idris A. Eckley.
+
+[Liquid surface tracking with error compensation](https://dl.acm.org/doi/10.1145/2461912.2461991) By Bojsen-Hansen, Morten and Wojtan.
+
+[Multi-Material Mesh-Based Surface Tracking with Implicit Topology Changes](https://dl.acm.org/doi/10.1145/2461912.2461991) By Heiss-Synak, Peter and Kalinov, Aleksei and Strugaru, Malina and Etemadi, Arian and Yang, Huidong and Wojtan, Chris.
+
+[GPU-Accelerated Optimization of Discrete Ricci Flow for High-Resolution Triangular Meshes](https://ietresearch.onlinelibrary.wiley.com/doi/10.1049/ipr2.70237?utm_medium=article&utm_source=researchgate.net) By Zhiheng Wei, Kun Qian, Yinghua Li, Siyuan Li, Jialing Zhang, Junrong Song, Ming Yang, Ming Ni.
+
+[Community Detection on Networks with Ricci Flow](https://www.nature.com/articles/s41598-019-46380-9) By     Chien-Chun Ni, Yu-Yao Lin, Feng Luo & Jie Gao.
 
 </details>

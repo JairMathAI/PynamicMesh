@@ -233,8 +233,54 @@ def _pv():
     return pv
 
 
+# Surgery of the material mesh of a scene that divides / fuses: Trajectories/cut_faces.npy lists, per frame, the faces
+# whose material is in different cells. _ref_faces registers it with the faces it belongs to; _FrameViewer records the
+# frame being drawn; _poly leaves the cut faces out, so every viewer shows the cells separately after a division.
+_CUT_FACES = {}
+_DRAWING = {"k": None, "n": None}
+
+
+def _ref_faces(folder):
+    """reference_faces.npy of a Trajectories folder (and its cut_faces.npy, if the scene divides / fuses)."""
+    folder = Path(folder)
+    F = np.load(folder / "reference_faces.npy")
+    masks = {}
+    for cut in (folder / "cut_faces.npy", folder / "interpolation" / "cut_faces.npy"):   # per frame / per sub-frame sample
+        if cut.exists():
+            c = np.load(cut)
+            if c.ndim == 2 and c.shape[1] == len(F):
+                masks[c.shape[0]] = c
+    if masks:
+        _CUT_FACES[id(F)] = (F, masks)
+    return F
+
+
+def _cut_rows(F, k, n):
+    """Faces of the registered mesh F cut at frame k of a viewer with n frames (None: nothing cut / not registered)."""
+    entry = _CUT_FACES.get(id(F))
+    if entry is None or entry[0] is not F or k is None:
+        return None
+    mask, kk = entry[1].get(n), k
+    if mask is None and n is not None and entry[1].get(n + 1) is not None:
+        mask, kk = entry[1][n + 1], k + 1
+    return mask[kk] if mask is not None and 0 <= kk < len(mask) else None
+
+
 def _poly(V, F):
-    pv = _pv(); F = np.asarray(F)
+    """PolyData of a triangle mesh (faces cut by a division at the frame being drawn are left out)."""
+    pv = _pv()
+    entry = _CUT_FACES.get(id(F))
+    if entry is not None and entry[0] is F:
+        k, n = _DRAWING["k"], _DRAWING["n"]
+        mask, kk = entry[1].get(n), k
+        if mask is None and n is not None and entry[1].get(n + 1) is not None and k is not None:
+            mask, kk = entry[1][n + 1], k + 1               # a viewer of TRANSITIONS: field k drawn on frame k+1
+        k = kk
+        if k is not None and mask is not None and 0 <= k < len(mask) and mask[k].any():
+            # cut faces collapsed to zero-area triangles: invisible, but the mesh keeps one cell per face, so viewers
+            # that attach one value per face stay aligned
+            F = F.copy(); F[mask[k]] = F[mask[k]][:, [0, 0, 0]]
+    F = np.asarray(F)
     return pv.PolyData(np.asarray(V, dtype=np.float64), np.hstack([np.full((F.shape[0], 1), 3), F]).ravel())
 
 
@@ -455,6 +501,7 @@ class _FrameViewer:
             if vf is not None:
                 self.clear(); self.draw_field_layout(*vf); return
             self.field_layout = False; self.projection = None
+        _DRAWING["k"], _DRAWING["n"] = getattr(self, "k", None), getattr(self, "n", None)
         self.draw()
         if getattr(self, "_camera_dirty", False) and self.plotter is not None:   # back from a projection: perspective again,
             try:                                                                    # AFTER the actors exist (else the reset sees an empty scene)
@@ -860,13 +907,13 @@ def visualize_trajectories(results_path, mesh_path=None, loader=None, stride=1, 
     unselected dots are grey).  `stride` subsamples the vertices (1 = every vertex).
     """
     res = Path(results_path) / "Trajectories"
-    X = np.load(res / "trajectories.npy"); F0 = np.load(res / "reference_faces.npy")
+    X = np.load(res / "trajectories.npy"); F0 = _ref_faces(res)
     T, n0, _ = X.shape
     names = _frame_names(results_path, mesh_path, T)
     frames = load_frames(mesh_path, loader) if mesh_path is not None else None
     disp_dir = res / "displacements"
     if scheme is None:                                       # best validated scheme that was actually exported
-        available = [f.stem for f in (res / "interpolation").glob("*.npy") if f.stem not in ("query_times",)]
+        available = [f.stem for f in (res / "interpolation").glob("*.npy") if f.stem not in ("query_times", "cut_faces")]
         try:
             import pandas as pd
             v = pd.read_csv(res / "interpolation" / "validation.csv"); col = [c for c in v.columns if "error" in c.lower()][0]
@@ -983,8 +1030,10 @@ def visualize_trajectories(results_path, mesh_path=None, loader=None, stride=1, 
             Vk, d = self._displacement(self.k)
             if d is None:
                 return None
-            sel = np.arange(0, Vk.shape[0], max(1, stride)); mag = np.linalg.norm(d, axis=1)
-            return Vk[sel], d[sel], f"{modes[0]}  (arrows ×{0.08 * diam / (mag.max() + 1e-12):.3g})", 0.08 * diam / (mag.max() + 1e-12)
+            ok = np.flatnonzero(np.isfinite(d).all(axis=1) & np.isfinite(Vk).all(axis=1))   # no value: no arrow
+            sel = ok[::max(1, stride)]; mag = np.linalg.norm(d[sel], axis=1)
+            m_ = (float(np.nanmax(mag)) if mag.size else 0.0) + 1e-12
+            return Vk[sel], d[sel], f"{modes[0]}  (arrows ×{0.08 * diam / m_:.3g})", 0.08 * diam / m_
 
         def draw(self):
             self.clear(); p = self.plotter; k = self.k; mode = self.mode % len(modes)
@@ -1053,7 +1102,7 @@ def visualize_interpolation(results_path, scheme="arap_polar", compare_with=None
     scheme is shown side by side.  The frame counter runs over the query times (observed + interpolated).
     """
     res = Path(results_path) / "Trajectories"
-    F = np.load(res / "reference_faces.npy"); tq = np.load(res / "interpolation" / "query_times.npy"); t = np.load(res / "time.npy")
+    F = _ref_faces(res); tq = np.load(res / "interpolation" / "query_times.npy"); t = np.load(res / "time.npy")
     A = np.load(res / "interpolation" / f"{scheme}.npy")
     B = np.load(res / "interpolation" / f"{compare_with}.npy") if compare_with else None
     observed = np.isin(np.round(tq, 8), np.round(t, 8))
@@ -1096,7 +1145,7 @@ def visualize_hodge(results_path, mesh_path=None, stride=2, arrow_scale=None):
     key again returns to 3-D and 'v' returns to the surface view.  'h' hides the mesh in the surface view.
     """
     res = Path(results_path); trj = res / "Trajectories"; hd = res / "DynamicAnalysis" / "Hodge"
-    X = np.load(trj / "trajectories.npy"); F = np.load(trj / "reference_faces.npy")
+    X = np.load(trj / "trajectories.npy"); F = _ref_faces(trj)
     vel = np.load(trj / "kinematics" / "velocity.npy")
     T = X.shape[0]; names = _frame_names(results_path, mesh_path, T)
     # plain-text operators: VTK hands labels with symbols missing from its font to matplotlib's mathtext, whose default
@@ -1118,16 +1167,24 @@ def visualize_hodge(results_path, mesh_path=None, stride=2, arrow_scale=None):
             V = X[self.k]; comp = np.load(hd / f"components_T{self.k:04d}.npy"); c = self.mode % len(comps)
             centers = V[F].mean(axis=1)
             if c == 4:
-                N = vertex_normals(V, F); vn = np.einsum("ij,ij->i", vel[self.k], N)
+                # normals from the EXISTING faces only, no vector on a cut face (a scene that divides / fuses)
+                cut = _cut_rows(F, self.k, T)
+                Fa = F if cut is None else F[~cut]
+                N = vertex_normals(V, Fa); vn = np.einsum("ij,ij->i", vel[self.k], N)
                 field = (vn[F].mean(axis=1))[:, None] * (N[F].mean(axis=1))
+                if cut is not None:
+                    field[cut] = np.nan
             else:
                 field = comp[c]
             return V, centers, field, c
 
         def vector_field(self):
-            _, centers, field, c = self._field(); sel = slice(None, None, max(1, stride))
-            frame_scale = 0.12 * diam / (np.linalg.norm(field, axis=1).max() + 1e-12)     # per frame: longest arrow 12 % of the cell
-            return centers[sel], field[sel], f"component: {comps[c]}  (arrows ×{frame_scale:.3g})", frame_scale
+            _, centers, field, c = self._field()
+            ok = np.isfinite(field).all(axis=1) & np.isfinite(centers).all(axis=1)   # no value (cut faces, surgeries): no arrow
+            centers, field = centers[ok][::max(1, stride)], field[ok][::max(1, stride)]
+            mag = np.linalg.norm(field, axis=1)
+            frame_scale = 0.12 * diam / ((float(np.nanmax(mag)) if mag.size else 0.0) + 1e-12)  # longest arrow 12 % of the cell
+            return centers, field, f"component: {comps[c]}  (arrows ×{frame_scale:.3g})", frame_scale
 
         def draw(self):
             self.clear(); p = self.plotter
@@ -1136,7 +1193,9 @@ def visualize_hodge(results_path, mesh_path=None, stride=2, arrow_scale=None):
             if self.show_mesh:
                 m = _poly(V, F); pot = np.load(hd / f"potentials_T{self.k:04d}.npy")
                 if c == 4:
-                    m["normal speed"] = np.einsum("ij,ij->i", vel[self.k], vertex_normals(V, F)); key = "normal speed"
+                    cut = _cut_rows(F, self.k, T)
+                    m["normal speed"] = np.einsum("ij,ij->i", vel[self.k], vertex_normals(V, F if cut is None else F[~cut]))
+                    key = "normal speed"
                 else:
                     key = "alpha (sources/sinks)" if c in (0, 1) else ("beta (stream function)" if c == 2 else "divergence")
                     m[key] = pot[:, 0] if c in (0, 1) else (pot[:, 1] if c == 2 else pot[:, 2])
@@ -1150,10 +1209,10 @@ def visualize_hodge(results_path, mesh_path=None, stride=2, arrow_scale=None):
 
 def visualize_ftle(results_path, mesh_path=None):
     """Reference mesh coloured by the finite-time Lyapunov exponent of the flow map Φ(0 → k+1)."""
-    res = Path(results_path); X = np.load(res / "Trajectories" / "trajectories.npy"); F = np.load(res / "Trajectories" / "reference_faces.npy")
+    res = Path(results_path); X = np.load(res / "Trajectories" / "trajectories.npy"); F = _ref_faces(res / "Trajectories")
     files = _sorted(res / "DynamicAnalysis" / "FTLE", "ftle_T*.npy")
     fields = [np.load(f) for f in files]
-    clim = [np.percentile(np.concatenate(fields), 2), np.percentile(np.concatenate(fields), 98)]
+    clim = [np.nanpercentile(np.concatenate(fields), 2), np.nanpercentile(np.concatenate(fields), 98)]
     names = _frame_names(results_path, mesh_path, X.shape[0])
 
     class Viewer(_FrameViewer):
@@ -1220,11 +1279,11 @@ def visualize_dynamic_trajectories(results_path, mesh_path=None, scheme=None, st
     so the motion between two meshes is shown continuously; the label tells which meshes bracket the time.
     """
     res = Path(results_path) / "Trajectories"
-    X = np.load(res / "trajectories.npy"); F0 = np.load(res / "reference_faces.npy")
+    X = np.load(res / "trajectories.npy"); F0 = _ref_faces(res)
     T, n0, _ = X.shape
     t_obs = np.load(res / "time.npy") if (res / "time.npy").exists() else np.arange(T, dtype=float)
     obs_names = _frame_names(results_path, mesh_path, T)
-    available = [f.stem for f in (res / "interpolation").glob("*.npy") if f.stem != "query_times"]
+    available = [f.stem for f in (res / "interpolation").glob("*.npy") if f.stem not in ("query_times", "cut_faces")]
     if scheme is None and available:
         try:
             import pandas as pd
@@ -1239,10 +1298,21 @@ def visualize_dynamic_trajectories(results_path, mesh_path=None, scheme=None, st
         P, tq, scheme = X, t_obs, "observed frames only"
     S = P.shape[0]
     idx = np.arange(0, n0, max(1, stride)); P = P[:, idx]
+    # a scene that divides / fuses: the particles ALIVE at every step (material_cell; an event acts at the middle of
+    # its interval) — particles not yet born or already dead (anchored to real material) are not drawn
+    alive_s = np.ones((S, len(idx)), bool)
+    if (res / "material_cell.npy").exists():
+        try:
+            Cm = np.load(res / "material_cell.npy")[:, idx]
+            ks = np.clip(np.searchsorted(t_obs, tq, side="right") - 1, 0, T - 1); nx = np.clip(ks + 1, 0, T - 1)
+            past = (tq - t_obs[ks]) >= 0.5 * np.maximum(t_obs[nx] - t_obs[ks], 1e-12)
+            alive_s = Cm[np.where(past & (nx > ks), nx, ks)] >= 0
+        except Exception:  # noqa: BLE001
+            pass
     speed = np.zeros((S, len(idx)))
     if S > 1:
         speed[1:] = np.linalg.norm(np.diff(P, axis=0), axis=2) / np.maximum(np.diff(tq)[:, None], 1e-12); speed[0] = speed[1]
-    smax = np.percentile(speed, 98) + 1e-12
+    smax = np.nanpercentile(speed, 98) + 1e-12
     diam = np.linalg.norm(P[0].max(0) - P[0].min(0))
     names = []
     for q in tq:
@@ -1327,7 +1397,7 @@ def visualize_dynamic_trajectories(results_path, mesh_path=None, scheme=None, st
             """Particles: the selected ones coloured by speed (or `color`), the unselected ones grey."""
             if not self.show_dots:
                 return
-            pv = _pv(); sel = self.sel
+            pv = _pv(); al = alive_s[k]; sel = self.sel & al
             if sel.any():
                 pd_ = pv.PolyData(P[k][sel])
                 if color is None:
@@ -1336,12 +1406,13 @@ def visualize_dynamic_trajectories(results_path, mesh_path=None, scheme=None, st
                                           render_points_as_spheres=True, scalar_bar_args=self.scalar("speed"))
                 else:
                     self.plotter.add_mesh(pd_, color=color, point_size=5, render_points_as_spheres=True)
-            if not sel.all():
-                self.plotter.add_mesh(pv.PolyData(P[k][~sel]), color="darkgray", point_size=5 if color else 6,
+            uns = ~self.sel & al
+            if uns.any():
+                self.plotter.add_mesh(pv.PolyData(P[k][uns]), color="darkgray", point_size=5 if color else 6,
                                       render_points_as_spheres=True)
 
         def _trails(self, k, color_by_speed=True):
-            a = max(0, k - self.trail); sel = self.sel
+            a = max(0, k - self.trail); sel = self.sel & alive_s[a:k + 1].all(axis=0)   # alive over the whole trail
             if k - a >= 1 and sel.any():                 # trails of the selected particles only
                 Q = P[a:k + 1][:, sel]
                 if color_by_speed:                       # the heads carry the speed bar; without heads the trails do
@@ -1356,8 +1427,9 @@ def visualize_dynamic_trajectories(results_path, mesh_path=None, scheme=None, st
             if mode == 0:
                 self._trails(k); self._heads(k)
             elif mode == 1:
-                if k >= 1 and self.sel.any():
-                    Q = P[:k + 1][:, self.sel]; tt = np.tile(tq[:k + 1][:, None], (1, Q.shape[1]))
+                sh = self.sel & alive_s[k]                      # paths of the particles alive now
+                if k >= 1 and sh.any():
+                    Q = P[:k + 1][:, sh]; tt = np.tile(tq[:k + 1][:, None], (1, Q.shape[1]))
                     p.add_mesh(polylines(Q, tt, "time"), scalars="time", cmap="viridis", line_width=1.2 * self.line_scale,
                                scalar_bar_args=self.scalar("time"))
                 self._heads(k, color="red")
@@ -1370,8 +1442,8 @@ def visualize_dynamic_trajectories(results_path, mesh_path=None, scheme=None, st
                         p.add_mesh(_poly(X[j], F0), color="lightgray", opacity=self.op_surface, smooth_shading=True)
                 self._trails(k); self._heads(k)
             else:
-                if self.sel.any():
-                    p.add_mesh(polylines(P[:, self.sel]), color="gray", line_width=0.6 * self.line_scale, opacity=0.12)
+                if (self.sel & alive_s[k]).any():
+                    p.add_mesh(polylines(P[:, self.sel & alive_s[k]]), color="gray", line_width=0.6 * self.line_scale, opacity=0.12)
                 self._trails(k, color_by_speed=False); self._heads(k)
             onoff = lambda b: "on" if b else "off"
             surf = (f"surface {onoff(self.show_mesh)} (opacity {self.op_surface:.2f}, p/l) | " if mode == 2
@@ -1468,8 +1540,145 @@ def visualize_graph_animation(results_path, mesh_path=None, graph=None, frame=No
         key = str(a["model"])
         if key not in models:
             P, times, F0, obs_step, name, X = trajectory_model(root, key)
-            models[key] = (P, F0)
+            # a scene that divides / fuses: the faces cut at every step (per sub-frame sample or per frame)
+            M = None
+            for f in (Path(root) / "Trajectories" / "interpolation" / "cut_faces.npy", Path(root) / "Trajectories" / "cut_faces.npy"):
+                if f.exists():
+                    c = np.load(f)
+                    if c.ndim == 2 and c.shape == (P.shape[0], len(F0)):
+                        M = c; break
+            models[key] = (P, F0, M)
         return models[key]
+
+    split_cache = {}
+
+    def split_at(a, s_):
+        """
+        The animated graph at step s_ in a scene that divides / fuses. The Reeb graph of a disjoint union is the
+        disjoint union of the Reeb graphs: a node (a level-set component, or a vertex set) whose anchor particles are in
+        several cells SPLITS into one node per cell, at the weighted centroid of its particles in that cell; a centre
+        node gets one copy per cell (centroid of the cell); an edge is kept in every cell where both its ends have a
+        part. After a fusion the parts are in one cell again and the nodes merge back. Regular scenes (one cell, or no
+        anchors saved): the graph as it is. Returns (node positions, edges, original node of every node, original edge of
+        every edge).
+        """
+        pos = np.asarray(a["positions"]); E = np.asarray(a["edges"], dtype=np.int64).reshape(-1, 2)
+        n = pos.shape[1]; ident = (pos[s_], E, np.arange(n), np.arange(len(E)))
+        f = str(a["folder"])
+        if f not in split_cache:
+            split_cache[f] = None
+            try:
+                tdir = Path(root) / "Trajectories"
+                if "anchor_indptr" in a and (tdir / "material_cell.npy").exists():
+                    C = np.load(tdir / "material_cell.npy"); tt = np.load(tdir / "time.npy")
+                    P = surface_of(a)[0]; times = np.asarray(a["times"], float)
+                    if P.shape[0] == len(times) and P.shape[1] == C.shape[1]:
+                        ks = np.clip(np.searchsorted(tt, times, side="right") - 1, 0, len(tt) - 1)
+                        nx = np.clip(ks + 1, 0, len(tt) - 1)
+                        past_mid = (times - tt[ks]) >= 0.5 * np.maximum(tt[nx] - tt[ks], 1e-12)
+                        kk = np.where(past_mid & (nx > ks), nx, ks)   # an event acts at the middle of its interval
+                        split_cache[f] = (C, P, kk, np.asarray(a["anchor_indptr"]), np.asarray(a["anchor_indices"]),
+                                          np.asarray(a["anchor_data"], float), set(np.asarray(a["centre_rows"]).tolist()))
+            except Exception:  # noqa: BLE001
+                split_cache[f] = None
+        sc = split_cache[f]
+        if sc is None:
+            return ident
+        C, P, kk, ip, ix, iw, centres = sc
+        Ck = C[kk[min(s_, len(kk) - 1)]]; Ps = P[min(s_, len(P) - 1)]
+        cells_now = sorted(set(Ck[Ck >= 0].tolist()))
+        if len(cells_now) <= 1 and not (Ck < 0).any():
+            return ident
+        pts, orig, where = [], [], {}
+        for r in range(n):
+            if r in centres:
+                for c in cells_now:                          # one centre per cell
+                    sel = Ck == c
+                    where[(r, c)] = len(pts); pts.append(Ps[sel].mean(axis=0)); orig.append(r)
+                continue
+            idx, w = ix[ip[r]:ip[r + 1]], iw[ip[r]:ip[r + 1]]
+            cc = Ck[idx]
+            for c in sorted(set(cc[cc >= 0].tolist())):
+                sel = cc == c
+                where[(r, c)] = len(pts); pts.append((w[sel, None] * Ps[idx[sel]]).sum(0) / max(w[sel].sum(), 1e-300)); orig.append(r)
+        En, oe = [], []
+        for ei, (u, v) in enumerate(E):
+            for c in cells_now:
+                if (int(u), c) in where and (int(v), c) in where:
+                    En.append((where[(int(u), c)], where[(int(v), c)])); oe.append(ei)
+        if not pts:
+            return ident
+        return (np.asarray(pts), np.asarray(En, dtype=np.int64).reshape(-1, 2), np.asarray(orig, dtype=np.int64),
+                np.asarray(oe, dtype=np.int64))
+
+    surgery_cache = {}
+
+    def edges_at(a, s_):
+        """Edges of the animated graph at step s_ in a scene that divides / fuses: an edge exists while its two anchor
+        particles are alive in the SAME cell (cut for good at a division, like the faces of the material mesh); at a
+        fusion a join edge links the closest nodes of the parts that became one cell. Regular scenes: all the edges."""
+        E = np.asarray(a["edges"], dtype=np.int64).reshape(-1, 2)
+        f = str(a["folder"])
+        if f not in surgery_cache:
+            surgery_cache[f] = None
+            try:
+                from scipy.spatial import cKDTree
+                tdir = Path(root) / "Trajectories"
+                C = np.load(tdir / "material_cell.npy"); tt = np.load(tdir / "time.npy")
+                XL = np.load(tdir / "trajectories_lifecycle.npy")
+                times = np.asarray(a["times"], float); posn = np.asarray(a["positions"], float)
+                if len(E) and len(tt) == C.shape[0]:
+                    ks = np.clip(np.searchsorted(tt, times, side="right") - 1, 0, len(tt) - 1)
+                    nx = np.clip(ks + 1, 0, len(tt) - 1)
+                    past_mid = (times - tt[ks]) >= 0.5 * np.maximum(tt[nx] - tt[ks], 1e-12)
+                    kk = np.where(past_mid & (nx > ks), nx, ks)          # an event acts at the middle of its interval
+                    # the cell of every node at every step: the cell of the nearest particle alive at that frame
+                    trees = {}
+                    cells = np.full((len(times), posn.shape[1]), -1, np.int64)
+                    for si, k_ in enumerate(kk):
+                        if k_ not in trees:
+                            al = np.flatnonzero(C[k_] >= 0)
+                            trees[k_] = (cKDTree(XL[k_, al]), al)
+                        tr_, al = trees[k_]
+                        cells[si] = C[k_, al[tr_.query(posn[si])[1]]]
+                    ok = (cells[:, E[:, 0]] == cells[:, E[:, 1]]) & (cells[:, E[:, 0]] >= 0)
+                    ok = np.logical_and.accumulate(ok, axis=0)            # a cut is permanent
+                    joins, pos = [], np.asarray(a["positions"])
+                    for s in range(1, len(times)):
+                        if kk[s] == kk[s - 1]:
+                            continue
+                        n = posn.shape[1]; par = list(range(n))
+
+                        def find(x):
+                            while par[x] != x:
+                                par[x] = par[par[x]]; x = par[x]
+                            return x
+                        for u, v in E[ok[s - 1]]:
+                            par[find(int(u))] = find(int(v))
+                        for u, v, _ in joins:
+                            par[find(int(u))] = find(int(v))
+                        comp = np.array([find(i) for i in range(n)])
+                        for c1 in np.unique(comp):
+                            for c2 in np.unique(comp):
+                                if c2 <= c1:
+                                    continue
+                                A_, B_ = np.flatnonzero(comp == c1), np.flatnonzero(comp == c2)
+                                same_now = cells[s, A_[0]] == cells[s, B_[0]] and cells[s, A_[0]] >= 0
+                                diff_before = cells[s - 1, A_[0]] != cells[s - 1, B_[0]]
+                                if same_now and diff_before:            # fused: join the closest nodes
+                                    d_ = np.linalg.norm(pos[s][A_][:, None] - pos[s][B_][None], axis=2)
+                                    i, j = np.unravel_index(np.argmin(d_), d_.shape)
+                                    joins.append((int(A_[i]), int(B_[j]), s))
+                    surgery_cache[f] = (ok, joins)
+            except Exception:  # noqa: BLE001 - regular scene (no lineage files): all the edges
+                surgery_cache[f] = None
+        sc = surgery_cache[f]
+        if sc is None or not len(E):
+            return E, np.ones(len(E), bool)
+        ok, joins = sc
+        keep = ok[min(s_, len(ok) - 1)]
+        J = np.array([(u, v) for u, v, s0 in joins if s0 <= s_], dtype=np.int64).reshape(-1, 2)
+        return np.vstack([E[keep], J]), keep
 
     actual_cache = {}
 
@@ -1633,23 +1842,25 @@ def visualize_graph_animation(results_path, mesh_path=None, graph=None, frame=No
         def draw_panel(self, c, a, mode):
             """One panel: animation `a` at the synchronised step, in modality `mode`; returns its label text."""
             p = self.plotter; p.subplot(0, c)
-            s_ = self._step_of(a); pos = a["positions"]; E = a["edges"]; diag = float(a["diag"])
+            s_ = self._step_of(a); pos = a["positions"]; diag = float(a["diag"])
+            Pn, En, orig_n, orig_e = split_at(a, s_)
             first = c == 0
             if self.show_mesh and self.op_surface > 0 and mode != 3:
-                P, F0 = surface_of(a)
+                P, F0, M = surface_of(a)
                 if s_ < P.shape[0]:
-                    p.add_mesh(_poly(P[s_], F0), color=PANEL_SURFACE_COLORS[c % len(PANEL_SURFACE_COLORS)],
+                    Fd = F0 if M is None else F0[~M[s_]]
+                    p.add_mesh(_poly(P[s_], Fd), color=PANEL_SURFACE_COLORS[c % len(PANEL_SURFACE_COLORS)],
                                opacity=self.op_surface, smooth_shading=True)
             lw = 2.5 * self.line_scale
             extra = ""
             if mode in (0, 1):
-                if len(E):
-                    p.add_mesh(lines_poly(pos[s_], E), color="black", line_width=lw)
+                if len(En):
+                    p.add_mesh(lines_poly(Pn, En), color="black", line_width=lw)
                 cols, f = self._node_colors(a)
                 if cols is not None:
-                    self._nodes(pos[s_], diag, colors=cols)
+                    self._nodes(Pn, diag, colors=np.asarray(cols)[orig_n])
                 else:                                       # same colour range in every panel (same graph)
-                    self._nodes(pos[s_], diag, scalars=f, cmap="viridis", clim=[float(np.min(f)), float(np.max(f)) + 1e-12],
+                    self._nodes(Pn, diag, scalars=np.asarray(f)[orig_n], cmap="viridis", clim=[float(np.min(f)), float(np.max(f)) + 1e-12],
                                 bar="node f value" if first else None)
                 if mode == 1 and s_ >= 1:
                     a0 = max(0, s_ - self.trail); Q = pos[a0:s_ + 1]
@@ -1661,20 +1872,21 @@ def visualize_graph_animation(results_path, mesh_path=None, graph=None, frame=No
                     extra = f"trail {self.trail} steps (Up/Down)"
             elif mode == 2:
                 st_all, v = strain_of(a)
-                strain = st_all[s_] if len(E) else np.zeros(0)
+                strain = st_all[s_][orig_e] if len(En) and st_all.size else np.zeros(0)
                 if compare:                                 # one strain range for all the panels
                     v = max(strain_of(b)[1] for b in self.V)
-                if len(E):
-                    p.add_mesh(lines_poly(pos[s_], E, strain, "edge strain"), scalars="edge strain", preference="cell",
+                if len(En):
+                    p.add_mesh(lines_poly(Pn, En, strain, "edge strain"), scalars="edge strain", preference="cell",
                                cmap="RdBu_r", clim=[-max(v, 1e-6), max(v, 1e-6)], line_width=lw * 1.4,
                                scalar_bar_args=self.scalar("edge strain L/L0 - 1"), show_scalar_bar=first)
                 times = a["times"]
                 s0, s1 = (s_, s_ + 1) if s_ + 1 < pos.shape[0] else (max(s_ - 1, 0), s_)
                 spd = np.linalg.norm(pos[s1] - pos[s0], axis=1) / max(times[s1] - times[s0], 1e-12)
-                self._nodes(pos[s_], diag, scalars=spd, cmap="plasma", clim=[0, float(spd.max()) + 1e-12], bar=None)
+                self._nodes(Pn, diag, scalars=spd[orig_n], cmap="plasma", clim=[0, float(np.nanmax(spd)) + 1e-12], bar=None)
                 extra = f"mean |strain| {np.abs(strain).mean() if len(strain) else 0:.3f}, max {np.abs(strain).max() if len(strain) else 0:.3f}"
             else:
                 obs = a["observed_step"]; j = int(np.argmin(np.abs(obs - s_)))
+                E = np.asarray(a["edges"], dtype=np.int64).reshape(-1, 2)
                 if len(E):
                     p.add_mesh(lines_poly(pos[s_], E), color="royalblue", line_width=lw)
                 self._nodes(pos[s_], diag, color="royalblue")
@@ -1745,9 +1957,12 @@ def visualize_motion_analysis(results_path, mesh_path=None, stride=2):
     of the trajectory-based physical fields, sliding-window FTLE. 'v' shows only the vectors (modes with arrows).
     """
     res = Path(results_path); trj = res / "Trajectories"; ma = res / "MotionAnalysis"
-    X = np.load(trj / "trajectories.npy"); F = np.load(trj / "reference_faces.npy"); T = X.shape[0]
+    X = np.load(trj / "trajectories.npy"); F = _ref_faces(trj); T = X.shape[0]
     Xn = np.load(ma / "RigidMotion" / "nonrigid_trajectories.npy") if (ma / "RigidMotion" / "nonrigid_trajectories.npy").exists() else X
     G = np.load(ma / "GrowthAtlas" / "cumulative_normal_growth.npy") if (ma / "GrowthAtlas" / "cumulative_normal_growth.npy").exists() else None
+    # a scene that divides / fuses: the deformation displacement accumulated along the lineage (Xn[k] - Xn[0] is not
+    # defined for material created after the first frame)
+    Dn = np.load(ma / "RigidMotion" / "nonrigid_displacement.npy") if (ma / "RigidMotion" / "nonrigid_displacement.npy").exists() else None
     pf = res / "Physical_fields" / "from_trajectories"
     names = _frame_names(results_path, mesh_path, T)
     diam = np.linalg.norm(X[0].max(0) - X[0].min(0))
@@ -1757,7 +1972,8 @@ def visualize_motion_analysis(results_path, mesh_path=None, stride=2):
     def field(mode, k):
         """(vertices, per-vertex scalar or None, face centres, face vectors or None, scalar name)."""
         if mode == 0:
-            d = Xn[k] - Xn[0]; return Xn[k], np.linalg.norm(d, axis=1), Xn[k], d, "deformation displacement"
+            d = Dn[k] if Dn is not None else Xn[k] - Xn[0]
+            return Xn[k], np.linalg.norm(d, axis=1), Xn[k], d, "deformation displacement"
         if mode == 1:
             return X[k], (G[k] if G is not None else None), None, None, "cumulative normal growth"
         if mode == 2:
@@ -1782,7 +1998,7 @@ def visualize_motion_analysis(results_path, mesh_path=None, stride=2):
         vals = [field(m, k)[1] for k in range(0, T, max(1, T // 10))]
         vals = [v for v in vals if v is not None and len(v)]
         if vals:
-            a = np.concatenate(vals); lo, hi = np.percentile(a, 2), np.percentile(a, 98)
+            a = np.concatenate(vals); lo, hi = np.nanpercentile(a, 2), np.nanpercentile(a, 98)
             if m == 1:
                 hi = max(abs(lo), abs(hi)); lo = -hi
             clims[m] = [lo, hi if hi > lo else lo + 1e-12]
@@ -1801,9 +2017,11 @@ def visualize_motion_analysis(results_path, mesh_path=None, stride=2):
             V, s_, c, vec, name = field(self.mode % len(modes), self.k)
             if vec is None:
                 return None
-            sel = slice(None, None, max(1, stride))
-            sc = 0.12 * diam / (np.linalg.norm(vec, axis=1).max() + 1e-12)
-            return c[sel], vec[sel], f"{modes[self.mode % len(modes)]}  (arrows ×{sc:.3g})", sc
+            ok = np.isfinite(vec).all(axis=1) & np.isfinite(c).all(axis=1)       # no value: no arrow
+            c, vec = c[ok][::max(1, stride)], vec[ok][::max(1, stride)]
+            mag = np.linalg.norm(vec, axis=1)
+            sc = 0.12 * diam / ((float(np.nanmax(mag)) if mag.size else 0.0) + 1e-12)
+            return c, vec, f"{modes[self.mode % len(modes)]}  (arrows ×{sc:.3g})", sc
 
         def draw(self):
             self.clear(); p = self.plotter; m = self.mode % len(modes)
@@ -1833,7 +2051,7 @@ def visualize_reeb_dynamics(results_path, mesh_path=None, stride=1):
     adds the critical-point paths (discrete Jacobi curve) as trails.
     """
     res = Path(results_path); trj = res / "Trajectories"; rd = res / "ReebDynamics"
-    X = np.load(trj / "trajectories.npy"); F = np.load(trj / "reference_faces.npy"); T = X.shape[0]
+    X = np.load(trj / "trajectories.npy"); F = _ref_faces(trj); T = X.shape[0]
     Fk = np.load(rd / "field_on_tracked_mesh.npy")
     import pandas as pd
     paths = pd.read_csv(rd / "paths.csv")
@@ -1847,7 +2065,7 @@ def visualize_reeb_dynamics(results_path, mesh_path=None, stride=1):
     paths["branch"] = paths["kind"].astype(str) + "_" + paths["track"].astype(str)
     branches = sorted(paths.branch.unique()); cmap = matplotlib.colormaps["tab20"]
     color = {k: cmap(i % 20)[:3] for i, k in enumerate(branches)}
-    clim = [float(np.percentile(Fk, 1)), float(np.percentile(Fk, 99))]
+    clim = [float(np.nanpercentile(Fk, 1)), float(np.nanpercentile(Fk, 99))]
     modes = ["branches on the moving surface", "branches + critical-point paths"]
     # Morse–Smale regions of the protrusion branches and their adjacency graph (if computed)
     lab_f = rd / "regions" / "labels.npz"
@@ -1943,7 +2161,7 @@ def visualize_field_comparison(results_path, mesh_path=None):
     from PynamicMesh.core.motion_analysis import FIELD_PAIRS
     res = Path(results_path); trj = res / "Trajectories"; pf = res / "Physical_fields"
     cmpd = pf / "from_trajectories" / "comparison"
-    X = np.load(trj / "trajectories.npy"); F0 = np.load(trj / "reference_faces.npy"); T = X.shape[0]
+    X = np.load(trj / "trajectories.npy"); F0 = _ref_faces(trj); T = X.shape[0]
     ks = [k for k in range(1, T) if (cmpd / f"frame_{k:04d}.npz").exists() and (pf / f"frame_{k:04d}.npz").exists()]
     if not ks:
         print("No field comparison found: run the motion analysis with frame-to-frame physical fields "
@@ -1953,7 +2171,7 @@ def visualize_field_comparison(results_path, mesh_path=None):
     signed = {}
     for key in keys:                                  # signed fields (normal flow, strains) get a symmetric scale
         z0 = np.load(cmpd / f"frame_{ks[len(ks) // 2]:04d}.npz")
-        signed[key] = bool(min(np.percentile(z0[f"{key}_frame_to_frame"], 5), np.percentile(z0[f"{key}_trajectories"], 5)) < 0)
+        signed[key] = bool(min(np.nanpercentile(z0[f"{key}_frame_to_frame"], 5), np.nanpercentile(z0[f"{key}_trajectories"], 5)) < 0)
 
     def frame_ranges(z, key):
         """Common colour range of the two sources for THIS frame (2-98th percentiles of both: an outlier transition
@@ -1961,10 +2179,10 @@ def visualize_field_comparison(results_path, mesh_path=None):
         a, b = z[f"{key}_frame_to_frame"], z[f"{key}_trajectories"]
         v = np.concatenate([a, b])
         if signed[key]:
-            m = float(np.percentile(np.abs(v), 98)) or 1.0; cl = (-m, m)
+            m = float(np.nanpercentile(np.abs(v), 98)) or 1.0; cl = (-m, m)
         else:
-            lo, hi = float(np.percentile(v, 2)), float(np.percentile(v, 98)); cl = (lo, hi if hi > lo else lo + 1e-12)
-        dm = float(np.percentile(np.abs(b - a), 98)) or 1.0
+            lo, hi = float(np.nanpercentile(v, 2)), float(np.nanpercentile(v, 98)); cl = (lo, hi if hi > lo else lo + 1e-12)
+        dm = float(np.nanpercentile(np.abs(b - a), 98)) or 1.0
         return cl, (-dm, dm)
     sf = pf / "from_trajectories" / "comparison_fields.csv"
     stats = pd.read_csv(sf) if sf.exists() else None
@@ -2011,3 +2229,187 @@ def visualize_field_comparison(results_path, mesh_path=None):
 
     _launch(Viewer(len(ks), len(keys), shape=(1, 3), names=names, screenshot_dir=res / "MotionAnalysis" / "plots",
                    screenshot_name="field_comparison"), modes, t_obs)
+
+
+def visualize_lineage(results_path, mesh_path):
+    """
+    Topology events (Results/<scene>/TopologyEvents): the frames with every surface coloured by its lineage track
+    ('lineage'), the neck of every surface — its narrowest cut drawn as a ring, neck ratio in the label ('necks'),
+    and at the last frame before a division the mother coloured by the daughter each part becomes, with the new
+    membrane of the virtual daughters (the furrow) as red points ('divisions').
+    """
+    import pandas as pd
+    import matplotlib
+    from PynamicMesh.core.dyn_common import load_frames
+    from PynamicMesh.core.topology_events import submesh
+    from PynamicMesh.utils.tools import load_aligned_mesh
+    res = Path(results_path); te = res / "TopologyEvents"
+    frames = load_frames(mesh_path, load_aligned_mesh); T = len(frames)
+    comps = pd.read_csv(te / "components.csv")
+    vlab = np.load(te / "vertex_labels.npz")
+    necks = pd.read_csv(te / "necks.csv") if (te / "necks.csv").stat().st_size > 1 else None
+    tr = pd.read_csv(te / "transitions.csv") if (te / "transitions.csv").stat().st_size > 1 else None
+    divs = pd.read_csv(te / "divisions.csv") if (te / "divisions.csv").exists() and (te / "divisions.csv").stat().st_size > 1 else None
+    cmap = matplotlib.colormaps["tab10"]
+    tracks = sorted(comps.track.unique()); color = {int(k): cmap(i % 10)[:3] for i, k in enumerate(tracks)}
+    t_obs = _observed_times(results_path, T); t_obs = np.arange(T, dtype=float) if t_obs is None else t_obs
+    names = [f["name"] for f in frames]
+    mother_at = {}                                       # mother frame -> division index
+    if divs is not None:
+        for r in divs.itertuples():
+            mother_at[int(r.frame) - 1] = int(r.division)
+    modes = ["lineage (surfaces by track)", "necks (narrowest cut of every surface)", "divisions (mother partition + new membrane)"]
+    cf = np.load(te / "conformal_factor.npz") if (te / "conformal_factor.npz").exists() else None
+    if cf is not None:
+        modes.append("conformal factor (surface Ricci flow)")
+
+    class Viewer(_FrameViewer):
+        title = "Topology events: lineage, necks and divisions"
+        help_text = ("m : view (lineage / necks / divisions)\n"
+                     "Lineage: every surface coloured by its track (one track = one surface between two events).\n"
+                     "Necks: the narrowest cut of every surface (ring); neck ratio ~1 for a round surface, -> 0 when the\n"
+                     "surface is about to divide.\n"
+                     "Divisions: at the last frame before a division, the mother coloured by the daughter each part\n"
+                     "becomes, red points = new membrane (surface of the virtual daughters with no mother counterpart).\n"
+                     "Conformal factor: log of the local scaling of the uniformization (discrete surface Ricci flow):\n"
+                     "warm = necks / saddle regions (dilated), cold = protrusions (shrunk).\n"
+                     "← → : frames")
+        keys_line = "← → frames | Enter play | space GIF | m view | s screenshot | i help | q quit"
+
+        def draw(self):
+            self.clear(); p = self.plotter; k = self.k; view = self.mode % len(modes)
+            V, F = frames[k]["V"], frames[k]["F"]
+            lab = vlab[f"frame_{k:04d}"]
+            ck = comps[comps.frame == k]
+            trk = {int(r.component): int(r.track) for r in ck.itertuples()}
+            rgb = np.full((len(V), 3), 0.8)
+            for c, tid in trk.items():
+                rgb[lab == c] = color[tid]
+            txt = f"view: {modes[view]}  |  surfaces {len(trk)} (tracks {sorted(trk.values())})"
+            if view == 2 and k in mother_at:
+                dv = te / "Divisions" / f"division_{mother_at[k]:02d}"
+                part = np.load(dv / "mother_partition.npy")
+                mt = int(divs[divs.division == mother_at[k]].mother_track.iloc[0])
+                mc = [c for c, tid in trk.items() if tid == mt]
+                if mc:
+                    _, _, keep = submesh(V, F, lab == mc[0])
+                    kids = eval(divs[divs.division == mother_at[k]].daughter_tracks.iloc[0])
+                    for i, kt in enumerate(kids):
+                        rgb[keep[part == i + 1]] = color.get(int(kt), (0.5, 0.5, 0.5))
+                    for f in sorted(dv.glob("virtual_daughter_*.npz")):
+                        z = np.load(f)
+                        if z["new_membrane"].any():
+                            p.add_mesh(self.pv.PolyData(z["V"][z["new_membrane"]]), color="red", point_size=6,
+                                       render_points_as_spheres=True)
+                    txt += f"  |  division {mother_at[k]}: mother {mt} -> daughters {kids}"
+            if view == 3 and cf is not None:
+                u = cf[f"frame_{k:04d}"].astype(float)
+                lim = float(np.nanpercentile(np.abs(u), 98)) or 1.0
+                m = _poly(V, F); m["conformal factor"] = np.nan_to_num(u)
+                p.add_mesh(m, scalars="conformal factor", cmap="coolwarm", clim=[-lim, lim], smooth_shading=True,
+                           scalar_bar_args=self.scalar("conformal factor"))
+                if necks is not None:
+                    txt += "  |  conformal neck index " + ", ".join(
+                        f"track {int(r.track)}: {r.conformal_neck_index:+.2f}" for r in necks[necks.frame == k].itertuples()
+                        if hasattr(r, "conformal_neck_index"))
+                self.label(txt)
+                return
+            m = _poly(V, F); m["track"] = (rgb * 255).astype(np.uint8)
+            p.add_mesh(m, scalars="track", rgb=True, smooth_shading=True, opacity=0.95 if view != 2 else 0.85)
+            if view == 1 and necks is not None:
+                for r in necks[necks.frame == k].itertuples():
+                    ring = self.pv.Disc(center=(r.cx, r.cy, r.cz), inner=0.9 * r.neck_radius, outer=1.05 * r.neck_radius,
+                                        normal=(r.nx, r.ny, r.nz), c_res=48)
+                    p.add_mesh(ring, color="red" if r.constricted else "black")
+                txt += "  |  neck ratio " + ", ".join(f"track {int(r.track)}: {r.neck_ratio:.2f}" for r in necks[necks.frame == k].itertuples())
+            if tr is not None:
+                ev = tr[tr.frame == k]
+                if len(ev):
+                    txt += "  |  " + "; ".join(f"{r.event} {r.parent_tracks}->{r.child_tracks}" for r in ev.itertuples())
+            self.label(txt)
+
+    _launch(Viewer(T, len(modes), names=names, screenshot_dir=te / "plots", screenshot_name="lineage"), modes, t_obs)
+
+
+def visualize_scene(results_path, mesh_path):
+    """
+    Full scene of a sequence that divides / fuses (Results/<scene>/TopologyEvents/Scene), on the frames of the scene:
+    'cells' (every surface by lineage track), 'material origin' (every vertex coloured by the position of the vertex of
+    the first frame its material comes from — the mother's material followed through daughters and fusions; grey =
+    created later), 'material age' (frames since the material was created: young = new membrane), 'speed' (scene
+    physical field) and 'Reeb graphs' (the graphs of all the cells of the frame).
+    """
+    import pickle
+    import matplotlib
+    from PynamicMesh.core.dyn_common import load_frames
+    from PynamicMesh.utils.tools import load_aligned_mesh
+    res = Path(results_path); te = res / "TopologyEvents"
+    frames = load_frames(mesh_path, load_aligned_mesh); T = len(frames)
+    mat = np.load(te / "Lineage_tracking" / "material.npz")
+    V0 = frames[0]["V"]; lo, hi = V0.min(0), V0.max(0)
+    cmap = matplotlib.colormaps["tab10"]
+    t_obs = _observed_times(results_path, T); t_obs = np.arange(T, dtype=float) if t_obs is None else t_obs
+    names = [f["name"] for f in frames]
+    vmax = 0.0
+    for k in range(1, T):
+        f = res / "Physical_fields" / f"frame_{k:04d}.npz"
+        if f.exists():
+            v = np.load(f)["velocity"].astype(float); v = v[np.isfinite(v)]
+            if len(v):
+                vmax = max(vmax, float(np.nanpercentile(v, 98)))
+    modes = ["cells (lineage tracks)", "material origin", "material age", "speed (scene physical field)", "Reeb graphs (all cells)"]
+
+    class Viewer(_FrameViewer):
+        title = "Scene: cells, material, physics and graphs through divisions and fusions"
+        help_text = ("m : view\n"
+                     "cells: every surface by lineage track\n"
+                     "material origin: colour = position (RGB) of the vertex of the first frame the material comes from;\n"
+                     "  grey = material created later (furrow, bridge)\n"
+                     "material age: frames since the material was created (dark = new membrane)\n"
+                     "speed: scene physical field through the events (new material masked)\n"
+                     "Reeb graphs: the Reeb graphs of all the cells of the frame\n← → : frames")
+        keys_line = "← → frames | Enter play | space GIF | m view | s screenshot | i help | q quit"
+
+        def draw(self):
+            self.clear(); p = self.plotter; k = self.k; view = self.mode % len(modes)
+            V, F = frames[k]["V"], frames[k]["F"]
+            track = mat[f"track_T{k:04d}"]; origin = mat[f"origin_T{k:04d}"]; birth = mat[f"birth_T{k:04d}"]
+            m = _poly(V, F); txt = f"view: {modes[view]}  |  cells {sorted(int(x) for x in np.unique(track[track >= 0]))}"
+            if view == 0:
+                rgb = np.full((len(V), 3), 0.8)
+                for tid in np.unique(track[track >= 0]):
+                    rgb[track == tid] = cmap(int(tid) % 10)[:3]
+                m["c"] = (rgb * 255).astype(np.uint8); p.add_mesh(m, scalars="c", rgb=True, smooth_shading=True)
+            elif view == 1:
+                rgb = np.full((len(V), 3), 0.6)
+                ok = origin >= 0
+                rgb[ok] = (V0[origin[ok]] - lo) / np.maximum(hi - lo, 1e-12)
+                m["c"] = (np.clip(rgb, 0, 1) * 255).astype(np.uint8); p.add_mesh(m, scalars="c", rgb=True, smooth_shading=True)
+                txt += f"  |  material from the first frame: {100 * ok[track >= 0].mean():.1f} %"
+            elif view == 2:
+                m["material age"] = (k - birth).astype(float)
+                p.add_mesh(m, scalars="material age", cmap="magma", clim=[0, max(T - 1, 1)], smooth_shading=True,
+                           scalar_bar_args=self.scalar("material age (frames)"))
+            elif view == 3:
+                f = res / "Physical_fields" / f"frame_{k:04d}.npz"
+                v = np.load(f)["velocity"].astype(float) if f.exists() else np.zeros(len(V))
+                m["speed"] = np.nan_to_num(v, nan=0.0)
+                p.add_mesh(m, scalars="speed", cmap="viridis", clim=[0, vmax or 1.0], smooth_shading=True,
+                           scalar_bar_args=self.scalar("speed"))
+            else:
+                p.add_mesh(m, color="lightgray", opacity=0.35, smooth_shading=True)
+                gf = res / "Reeb_Graphs" / f"Reeb_T{k:04d}.pkl"
+                if gf.exists():
+                    with open(gf, "rb") as fh:
+                        G = pickle.load(fh)
+                    pos = {nd: np.asarray(d["pos"], float) for nd, d in G.nodes(data=True) if "pos" in d}
+                    for a, b in G.edges():
+                        if a in pos and b in pos:
+                            p.add_mesh(self.pv.Line(pos[a], pos[b]), color=cmap(int(G.nodes[a].get("track", 0)) % 10)[:3], line_width=4)
+                    if pos:
+                        p.add_mesh(self.pv.PolyData(np.array(list(pos.values()))), color="black", point_size=7,
+                                   render_points_as_spheres=True)
+                    txt += f"  |  nodes {G.number_of_nodes()}, edges {G.number_of_edges()}"
+            self.label(txt)
+
+    _launch(Viewer(T, len(modes), names=names, screenshot_dir=te / "plots", screenshot_name="scene"), modes, t_obs)

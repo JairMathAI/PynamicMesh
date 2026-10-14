@@ -96,7 +96,7 @@ def trajectory_model(target_folder, model="best"):
     X = np.load(tr / "trajectories.npy"); F0 = np.load(tr / "reference_faces.npy")
     t_obs = np.load(tr / "time.npy") if (tr / "time.npy").exists() else np.arange(X.shape[0], dtype=float)
     interp = tr / "interpolation"
-    available = sorted(f.stem for f in interp.glob("*.npy") if f.stem != "query_times") if interp.is_dir() else []
+    available = sorted(f.stem for f in interp.glob("*.npy") if f.stem not in ("query_times", "cut_faces")) if interp.is_dir() else []
     name = model
     if model == "best":
         name = "observed"
@@ -304,7 +304,11 @@ def animate_graph(target_folder, graph="reeb", frame=0, model="best", frames=Non
     np.savez_compressed(out / "animation.npz", positions=pos, times=times, edges=edges,
                         node_keys=np.array([str(k) for k in keys]), node_type=np.array(ntype), node_f=f_val,
                         node_anchor=np.array(kinds), observed_step=obs_step, source_frame=frame, source_step=s_k,
-                        graph=graph, model=model_name, diag=diag)
+                        graph=graph, model=model_name, diag=diag,
+                        # anchors of the nodes (rows of A: particles + weights) and the centre nodes: in a scene that
+                        # divides / fuses the viewer splits every node by the cells of its anchor set
+                        anchor_indptr=A.indptr, anchor_indices=A.indices, anchor_data=A.data,
+                        centre_rows=np.asarray(centre_rows, dtype=np.int64))
     np.save(out / "edge_strain.npy", strain.astype(np.float32))
     summary.to_csv(out / "summary.csv", index=False)
     nodes_df.to_csv(out / "nodes.csv", index=False)

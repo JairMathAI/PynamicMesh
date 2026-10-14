@@ -4,7 +4,7 @@ from pathlib import Path
 from PynamicMesh.core.graph_sim import graph_similarity, plot_graph_similarity
 from PynamicMesh.utils.dynamics_visualizers import (
     visualize_parametrization, visualize_trajectories, visualize_dynamic_trajectories, visualize_interpolation,
-    visualize_hodge, visualize_ftle, visualize_shape_modes, visualize_graph_animation, visualize_motion_analysis, visualize_reeb_dynamics
+    visualize_hodge, visualize_ftle, visualize_shape_modes, visualize_graph_animation, visualize_motion_analysis, visualize_reeb_dynamics, visualize_scene
 )
 from PynamicMesh.utils.visualizers import (
     visualize_reeb_graphs,
@@ -91,6 +91,10 @@ visual_selection_edition(mesh_path,'harmonic')
 
 print('Precomputing Source-sink Vertex index for RG...')
 precompute_landmarks(base_mesh_path,'harmonic')
+
+######################################################################################################  Topological Events Visual Launcher  ###################################################################################
+print('Visualizing topological events scene...')
+visualize_scene(scene_results_path, mesh_path)
 
 #########################################################################################################################################################################################################################################################################
 
@@ -411,6 +415,42 @@ dyn_analysis_params = {
 }
 
 
+####################################################################################################### Topological Events / Scene Assembly ###################################################################################################################################
+# Motion analysis (Results/<scene>/MotionAnalysis): rigid vs non-rigid motion, physical fields from the trajectories
+# (complement of Physical_fields), growth atlas, growth anisotropy + sliding-window FTLE, polarity, regional kinematics,
+# protrusion kinetics, skeleton branches, signals + event timeline + synchronisation + periods + DMD. Needs the
+# trajectories; uses every other result available (Morse-Smale tracking, shape space, graph animation, frame times).
+# Time-varying Reeb graph (Edelsbrunner et al. 2008) on the tracked mesh (Results/<scene>/ReebDynamics): the Reeb field
+# with the same material source in every frame, interpolated between the frames; branches (maximum/minimum-saddle
+# persistence pairs) followed along their critical-point paths; birth / death / interchange / dominance events.
+# Needs the trajectories; runs before the motion analysis (its events join the motion event timeline).
+# Topology events (Results/<scene>/TopologyEvents): pieces of every frame (mesh, solid, eroded), divisions / fusions,
+# lineage tree, necks (narrowest bottleneck: spectral Cheeger cut, or Ricci flow with GraphRicciCurvature), pinched
+# surfaces split at their neck, division geometry (Hertwig angle, volume ratios, new membrane) and daughter -> mother
+# correspondences through virtual daughters. When the sequence divides / fuses (or holds several surfaces) and
+# lineage_mode is 'auto', the whole scene gets the basic geometry only and the WHOLE pipeline runs on every lineage
+# track (Results/<scene>/TopologyEvents/Results/<track>/); single-surface sequences are processed as before.
+compute_TopologyEvents = True
+lineage_mode = 'auto'               # 'auto' | True | False (detection only)
+topology_params = {
+    'voxels': 96,                   # voxels along the longest side of the global grid (solid pieces, overlaps)
+    'neck_method': 'spectral',      # 'spectral' (Fiedler sweep cut, fast) | 'ricci' (Ricci flow, GraphRicciCurvature)
+    'neck_threshold': 0.5,          # neck ratio below which a surface is reported as constricted
+    'split_pinched': True,          # a surface pinched at its neck (cells held by a vertex / thread) counts as two
+    'pinch_ratio': 0.08,            # neck ratio of a pinch
+    'min_part_fraction': 0.15,      # both parts of a pinch must hold this fraction of the area (thin tips are not split)
+    'match_min_overlap': 0.05,      # overlap of the solids (fraction of the smaller) linking pieces of consecutive frames
+    'min_track_frames': 3,          # shortest track analysed by the lineage pipeline
+    'division_maps': 'fm',          # daughter -> mother correspondences: 'fm' (functional map) | 'nn' (nearest points)
+    'conformal_index': True,        # conformal factor of every surface (discrete surface Ricci flow, GPU-vectorized) and the
+                                    # conformal neck index (rises as a neck closes)
+    'conformal_method': 'auto',     # 'auto' (Ricci flow, linearized when it does not converge) | 'ricci' | 'linear'
+    'scene_assembly': True,         # lineage mode: full-scene results from the tracks (TopologyEvents/Scene): scene
+                                    # correspondences, material tracking, scene physical fields, scene graphs and graph
+                                    # surgery, comparison of the cells
+    'scene_maps': 'auto',           # 'auto' (functional maps, nearest points where a map is flipped) | 'fm' | 'nearest'
+    'plots': True,
+}
 
 ####################################################################################################### Pipeline Runing ###################################################################################################################################################
 print('Executing pipeline ...')
@@ -460,6 +500,9 @@ run_pipeline(
     parallel_scenes=parallel_scenes,
     reeb_topology_control=reeb_topology_control,
     analysis_graphs=analysis_graphs,
+    compute_topology_events=compute_TopologyEvents,
+    lineage_mode=lineage_mode,
+    topology_params=topology_params,
     compute_reeb_dynamics=compute_ReebDynamics,
     reeb_dynamics_params=reeb_dynamics_params,
     compute_motion_analysis=compute_MotionAnalysis,

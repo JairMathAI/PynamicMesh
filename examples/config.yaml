@@ -2,8 +2,9 @@ Data:
   path_str: './Mesh_models'
   devices: 'all'                      # GPUs: 'all' | 'cpu' | '0,1' (command line: --devices)
   workers: null                       # worker processes for the per-frame work (null = CPU cores - 1, at most 8)
-  parallel_scenes: 'auto'
-  compare_scenes: 'auto'              # comparison of the scenes (Results/_comparison): 'auto' (>= 2 scenes) | False            # several scenes at once, one per GPU: 'auto' (>1 GPU and >1 scene) | True | False
+  parallel_scenes: 'auto'             # several scenes at once, one per GPU: 'auto' (>1 GPU and >1 scene) | True | False
+  compare_scenes: 'auto'              # comparison of the scenes (Results/_comparison): 'auto' (>= 2 scenes) | False
+                                      # (the tracks of a scene that divides / fuses are never compared as scenes)
 
 
 Basic_Geometry:
@@ -62,7 +63,8 @@ Reeb_Graph:
   scalar_args:
     vertex_ref_index: [4896]          # index, list, 'mass_center', 'precomputed', or automatic: 'auto' | 'auto_center' | 'auto_extremity'
     geodesic_solver: 'heat'           # 'heat' | 'dijkstra'
-    reference_transport: 'auto'       # automatic references between frames: 'auto' | 'map' | 'position'
+    reference_transport: 'auto'       # automatic references between frames: 'auto' | 'direction' | 'map' | 'position'
+                                      # ('auto' / 'direction': the reference keeps its orientation -> no graph rotation)
     equalize_histogram: False         # True -> rank-normalized field (equally populated bins)
 
 Graph_similarity:
@@ -149,6 +151,8 @@ Trajectories:
       normal_threshold: 0.3
       max_icp_distance: 4.0
       inpainted_confidence: 0.25
+      flip_guard: 3.0                 # a functional map moving the points > 3x the nearest points is a symmetric flip:
+                                      # nearest points used instead (null = off)
     rigidity_params:                  # as-rigid-as-possible projection (Sorkine & Alexa 2007)
       enabled: True
       mode: 'arap'                    # 'arap' (near-isometric motion) | 'asap' (growth allowed)
@@ -193,6 +197,44 @@ Dynamic_Analysis:
     spherical_spectra: True
     spectral_lmax: 32
     sht_backend: 'auto'
+    plots: True
+
+Topology_Events:                      # divisions / fusions: lineage, necks, divisions, fusions; lineage mode runs the
+                                      # pipeline per track (Results/<scene>/TopologyEvents/Results/<track>/) and the
+                                      # scene assembly rebuilds the whole-scene results in the usual folders
+  compute_topology_events: True
+  topology_params:
+    lineage: 'auto'                   # lineage mode: 'auto' | True | False (detection only)
+    # --- detection and tracking of the pieces ---
+    voxels: 96                        # voxels along the longest side of the common grid
+    min_volume_fraction: 0.01         # smaller solid pieces are ignored
+    erode: 1                          # erosion (voxels) for the pieces about to separate
+    match_min_overlap: 0.05           # overlap of the solids linking two pieces of consecutive frames
+    # --- necks and pinches ---
+    neck_method: 'spectral'           # 'spectral' | 'ricci' (GraphRicciCurvature)
+    neck_threshold: 0.5               # neck ratio below which a surface is reported as constricted
+    ricci_nodes: 600                  # neck_method 'ricci': size of the coarsened graph
+    ricci_iterations: 10              # neck_method 'ricci': iterations of the graph Ricci flow
+    split_pinched: True               # a surface pinched at its neck counts as two pieces
+    pinch_ratio: 0.08
+    min_part_fraction: 0.15
+    conformal_index: True             # conformal factor (surface Ricci flow) + conformal neck index
+    conformal_method: 'auto'          # 'auto' | 'ricci' | 'linear'
+    # --- lineage ---
+    min_track_frames: 3               # shorter tracks are set aside (Lineage_meshes_short)
+    division_maps: 'fm'               # daughter -> mother correspondences: 'fm' | 'nn'
+    # --- scene assembly (lineage mode): whole-scene results in Results/<scene>/ ---
+    scene_assembly: True
+    scene_maps: 'auto'                # correspondences inside a cell: 'auto' (track map, nearest points where flipped) | 'fm' | 'nearest'
+    event_remesh: True                # re-seed the children of a division / fusion from their own surfaces
+    adaptive_remesh: True             # re-seed a cell whose material leaves its surface
+    fold_tol: 1.5                     # re-seeding: a material face farther than this (median edges) from the surface
+    drift_tol: 0.75                   #   or more than drift_share of the faces farther than drift_tol
+    drift_share: 0.01
+    k_nn: 8                           # advection: nearest mapped points of every particle
+    relax: 2                          # tangential relaxation passes per frame
+    death_factor: 2.5                 # a particle with no mapped point within this (median edges) dies
+    hold: True                        # transferred values shown continuously on the existing elements
     plots: True
 
 Reeb_Dynamics:                        # time-varying Reeb graph on the tracked mesh (needs the trajectories)
@@ -246,6 +288,7 @@ Frame_Times:
 GIF:
   gif: False
   gif_params:
+    verbose: False                    # GIFs that cannot be written: also on the console (always in gif_warnings.txt)
     fps: 6
     real_time: True                   # durations proportional to the real intervals (known frame times)
     max_frames: 240
