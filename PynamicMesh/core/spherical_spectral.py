@@ -94,12 +94,16 @@ class SphericalTransform:
     def _legendre(self):
         """Θ_lm(θ_j) = Y_lm(θ_j, 0) (orthonormal, Condon–Shortley), table (lmax+1, lmax+1, nlat), zero for m > l."""
         if self._P is None:
-            from scipy.special import sph_harm_y
+            from scipy import special
             L = self.lmax
             P = np.zeros((L + 1, L + 1, self.nlat))
             for m in range(L + 1):
                 ls = np.arange(m, L + 1)
-                P[m:, m, :] = np.real(sph_harm_y(ls[:, None], m, self.theta[None, :], 0.0))
+                if hasattr(special, "sph_harm_y"):          # SciPy >= 1.15: sph_harm_y(l, m, polar, azimuth)
+                    Y = special.sph_harm_y(ls[:, None], m, self.theta[None, :], 0.0)
+                else:                                        # older SciPy: sph_harm(m, l, azimuth, polar)
+                    Y = special.sph_harm(m, ls[:, None], 0.0, self.theta[None, :])
+                P[m:, m, :] = np.real(Y)
             self._P = P
         return self._P
 

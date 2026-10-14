@@ -1091,7 +1091,23 @@ def compute_parametrization(mesh_folder, target_folder, loader=None, L_max=15, r
 
         # --- spherical / SPHARM: genus 0 closed (repaired when holes / debris break the topology) -----
         sphere_ok = topo["topology"] == "sphere" and topo["n_unreferenced_vertices"] == 0; Vs_, Fs_, kept = V, F, None
-        if not sphere_ok and topo["topology"] != "disk":
+        several = False
+        if topo.get("n_components", 1) > 1:
+            # several surfaces of real size (e.g. a cell that has divided): a sphere map / SPHARM is not defined for
+            # the frame — the topology events stage runs the analysis per surface (lineage mode). Small debris (< 5 %
+            # of the area) is still handled by the repair below.
+            from scipy.sparse.csgraph import connected_components as _cc
+            from scipy.sparse import coo_matrix as _coo
+            _e = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+            _, _lab = _cc(_coo((np.ones(len(_e)), (_e[:, 0], _e[:, 1])), shape=(len(V), len(V))), directed=False)
+            _fa = 0.5 * np.linalg.norm(np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]]), axis=1)
+            _ar = np.sort(np.bincount(_lab[F[:, 0]], weights=_fa))[::-1]
+            several = len(_ar) > 1 and _ar[1] >= 0.05 * _ar.sum()
+        if several:
+            row["topology_after_repair"] = "several surfaces"
+            print(f"  frame {i} ({fr['name']}): {topo['n_components']} surfaces -> no spherical map / SPHARM for this frame "
+                  "(sequences that divide or fuse are analysed per surface by the topology events stage, lineage mode)")
+        elif not sphere_ok and topo["topology"] != "disk":
             Vs_, Fs_, kept, rep = repair_to_sphere(V, F)
             topo_rep = mesh_topology(Vs_, Fs_)
             row.update({f"repair_{k}": v for k, v in rep.items()}); row["topology_after_repair"] = topo_rep["topology"]

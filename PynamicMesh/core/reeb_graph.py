@@ -461,6 +461,55 @@ def _transport(prev, vertices, prev_vertices=None, p2p=None, mode="auto"):
     return pos
 
 
+def _oriented_axis(v):
+    """Principal (long) axis of a point set, oriented by a global convention: its dominant coordinate is positive. Two
+    shapes with similar long axes (a mother and her daughters) get the same orientation."""
+    X = np.asarray(v, float) - np.mean(v, axis=0)
+    a = np.linalg.svd(X, full_matrices=False)[2][0]
+    return a if a[int(np.argmax(np.abs(a)))] >= 0 else -a
+
+
+def _center_by_direction(v, faces, direction, n_samples=8, tol=0.20):
+    """Intrinsic centre with an ORIENTATION constraint: among the vertices whose average geodesic distance is within
+    tol of the minimum (a wide, flat band on near-round shapes, where the centre is ill-defined) the one whose direction
+    from the centroid best matches `direction` (previous frame, or the oriented long axis) — the radial field from it,
+    and its Reeb graph, keep their orientation from frame to frame."""
+    start = int(np.argmin(np.linalg.norm(v - _area_weighted_center(v, faces), axis=1)))
+    D = []; d = _geo(v, faces, start)
+    for _ in range(int(n_samples)):
+        s_ = int(np.argmax(d)) if not D else int(np.argmax(np.min(np.stack(D), axis=0)))
+        ds = _geo(v, faces, s_); D.append(ds); d = ds
+    agd = np.mean(np.stack(D), axis=0)
+    cand = np.flatnonzero(agd <= agd.min() * (1 + tol) + 1e-12)
+    c = _area_weighted_center(v, faces)
+    u = v[cand] - c; u /= np.maximum(np.linalg.norm(u, axis=1, keepdims=True), 1e-300)
+    t = np.asarray(direction, float); t = t / max(np.linalg.norm(t), 1e-300)
+    return int(cand[np.argmax(u @ t)])
+
+
+def _extremity_by_direction(v, faces, from_idx, direction, frac=0.5, lam=1.5):
+    """Extremity of the shape in a given DIRECTION: among the vertices far from `from_idx` (geodesic distance >=
+    frac x max) the one maximising  d / d_max + lam x cos(angle(v - centroid, direction)). Measured from the
+    (area-weighted) centroid, stable even on near-round shapes whose intrinsic centre wanders."""
+    d = _geo(v, faces, from_idx)
+    cand = np.flatnonzero(d >= frac * d.max())
+    c = _area_weighted_center(v, faces)
+    u = v[cand] - c; u /= np.maximum(np.linalg.norm(u, axis=1, keepdims=True), 1e-300)
+    t = np.asarray(direction, float); t = t / max(np.linalg.norm(t), 1e-300)
+    return int(cand[np.argmax(d[cand] / max(d.max(), 1e-300) + lam * (u @ t))])
+
+
+def _direction_target(v, faces, center_idx, prev, n_samples=8):
+    """Point of this frame in the direction of the previous reference seen from the centre (or, without a previous
+    reference, along the oriented long axis): where the extremity is searched, so the reference keeps its ORIENTATION
+    from frame to frame (immune to flipped maps and to comparable extremities)."""
+    c = v[int(center_idx)]
+    d = np.asarray(prev["direction"], float) if prev is not None and prev.get("direction") is not None else _oriented_axis(v)
+    d = d / max(np.linalg.norm(d), 1e-300)
+    R = float(np.max(np.linalg.norm(v - c, axis=1)))
+    return c + d * R
+
+
 def resolve_auto_references(method, kwargs, vertices, faces, prev_state=None, prev_vertices=None, p2p=None, n_samples=8,
                             transport=None):
     """
@@ -471,8 +520,12 @@ def resolve_auto_references(method, kwargs, vertices, faces, prev_state=None, pr
       harmonic: source 'auto' = the farthest point from the intrinsic centre, sink 'auto' = the farthest point from the
           source (the two ends of the shape: a fair harmonic function with few critical points, Ni et al. 2004).
     Temporal consistency, as for the automatic landmarks of the functional maps: the reference of the previous frame
-    (prev_state) is transported to this frame (point-to-point map, or position) and the criterion is re-applied near
-    it, so the reference stays the same part of the shape. Returns (kwargs with indices, state of this frame).
+    (prev_state) is transported to this frame and the criterion is re-applied near it, so the reference stays the same
+    part of the shape. Extremities ('auto_extremity', harmonic source / sink) are transported by their DIRECTION from
+    the intrinsic centre (transport 'auto' / 'direction'): the extremity is searched around the centre + previous
+    direction x radius, and on a first frame (or a new cell after a division / fusion) along the long axis oriented by a
+    global convention — the orientation of the field (and of its Reeb graph) cannot flip between frames. 'map' /
+    'position' keep the point-to-point map / position transport. Returns (kwargs with indices, state of this frame).
     """
     method = str(method).lower()
     params = REFERENCE_PARAMS.get(method, {})
@@ -493,18 +546,32 @@ def resolve_auto_references(method, kwargs, vertices, faces, prev_state=None, pr
             continue
         tag = spec if isinstance(spec, str) else spec[0]
         mode = {"auto": default_mode, "auto_center": "center", "auto_extremity": "extremity"}[tag]
-        near = _transport((prev_state or {}).get(pname), v, prev_vertices, p2p, transport)
+        prev = (prev_state or {}).get(pname)
+        by_direction = transport in ("auto", "direction")
+        target = (np.asarray(prev["direction"], float) if prev is not None and prev.get("direction") is not None
+                  else _oriented_axis(v))
         if mode == "center":
-            idx = intrinsic_center(v, faces, n_samples, near)
+            # the intrinsic centre of a near-round shape is ill-defined: keep its DIRECTION from the centroid
+            if by_direction:
+                idx = _center_by_direction(v, faces, target, n_samples)
+            else:
+                near = _transport(prev, v, prev_vertices, p2p, transport)
+                idx = intrinsic_center(v, faces, n_samples, near)
         elif mode == "extremity":
             center = center if center is not None else intrinsic_center(v, faces, n_samples)
-            idx = farthest_point(v, faces, center, near)
+            idx = _extremity_by_direction(v, faces, center, target) if by_direction else \
+                farthest_point(v, faces, center, _transport(prev, v, prev_vertices, p2p, transport))
         else:                                          # far_from_source (harmonic sink)
             src = out.get("source_idx")
             src = int(np.atleast_1d(src)[0]) if src is not None and not _is_auto(src) else intrinsic_center(v, faces, n_samples)
-            idx = farthest_point(v, faces, src, near)
+            if by_direction and prev is not None:
+                idx = _extremity_by_direction(v, faces, src, target)
+            else:
+                idx = farthest_point(v, faces, src, _transport(prev, v, prev_vertices, p2p, transport))
+        dvec = v[int(idx)] - _area_weighted_center(v, faces)
+        state[pname] = {"index": int(idx), "position": v[idx].tolist(), "mode": mode,
+                        "direction": (dvec / max(np.linalg.norm(dvec), 1e-300)).tolist()}
         out[pname] = [int(idx)] if pname == "vertex_ref_index" else int(idx)
-        state[pname] = {"index": int(idx), "position": v[idx].tolist(), "mode": mode}
     return out, state
 
 
@@ -835,6 +902,14 @@ def get_scalar_field(vertices, faces, method="z", prev_vertices=None, p2p=None, 
         # Area-weighted center: the plain vertex mean is biased by vertex density.
         center = to_gpu(_area_weighted_center(v_cpu, faces))
         field = xp.linalg.norm(v_gpu - center, axis=1)
+
+    elif method in ("ricci_conformal", "ricci_protrusion"):
+        # conformal factor of the uniformization by discrete surface Ricci flow (ricci_flow.py; kwargs: ricci_method
+        # 'auto' | 'ricci' | 'linear'): necks / saddle regions are the maxima of 'ricci_conformal', protrusions the maxima
+        # of 'ricci_protrusion' (= minus the conformal factor); intrinsic, scale-invariant
+        from PynamicMesh.core.ricci_flow import conformal_factor
+        u = conformal_factor(v_cpu, faces, method=kwargs.get("ricci_method", "auto"))
+        field = to_gpu(u if method == "ricci_conformal" else -u)
 
     elif method in ("geodesic", "mass_center_geodesic"):
         # kwargs: vertex_ref_index (int | list | 'mass_center'), geodesic_solver ('heat' | 'dijkstra')

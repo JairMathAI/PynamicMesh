@@ -1204,10 +1204,10 @@ def launch_physics_viewer(frames_data, global_df=None, pct=(1.0, 99.0), screensh
         if arr.size == 0:
             return [0.0, 1.0]
         if center is not None:
-            v = np.percentile(np.abs(arr - center), pct[1])
+            v = np.nanpercentile(np.abs(arr - center), pct[1])
             v = v if v > 0 else 1e-6
             return [center - v, center + v]
-        lo, hi = np.percentile(arr, pct)
+        lo, hi = np.nanpercentile(arr, pct)
         return [lo, hi if hi > lo else lo + 1e-6]
 
     pages = []
@@ -1746,7 +1746,22 @@ def edit_graph(mesh_folder_path, reeb_folder_path):
     else:
         print(f"[SUCCESS] Exported {saved_count} updated topological structures to: {target_folder}")
 
+def _center_lineage(reeb_files):
+    """TopologyEvents/center_lineage.csv of the scene of these graphs (a scene that divides / fuses), or None."""
+    import pandas as pd
+    try:
+        g = Path(reeb_files[0]).resolve().parent
+        for root in (g.parent, g.parent.parent):
+            f = root / "TopologyEvents" / "center_lineage.csv"
+            if f.exists():
+                return pd.read_csv(f)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def launch_reeb_viewer(mesh_files, reeb_files, scalar_files, graph='reeb'):
+    centers = None      # the centre lineage is kept in TopologyEvents/center_lineage.csv; not drawn in this view
     graph_label = "Reeb" if graph == 'reeb' else "Morse-Smale critical-point"
     print(f"\nStarting interactive {graph_label} graph orchestrator...")
     
@@ -1787,14 +1802,29 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files, graph='reeb'):
         
         reeb_pv = create_reeb_polydata(graph_obj)
         if graph == 'mscomplex' and reeb_pv.n_points > 0:
-            # nodes at the vertices of the displayed mesh (on the surface, same rotation); the centre node
-            # (vertex -1) at the mean of the displayed points
+            # nodes at the vertices of the displayed mesh (on the surface, same rotation); a centre node (vertex -1)
+            # at the centroid of ITS surface: the connected piece of the mesh holding the nodes it is joined to — so a
+            # scene that divides gets one centre per daughter (one piece: the mean of the displayed points, as before)
             nodes = list(graph_obj.nodes(data=True))
             vidx = np.array([int(d.get('vertex', -1)) for _, d in nodes])
             pts = np.array(reeb_pv.points, dtype=float)
+            mp = np.asarray(meshn.points)
             ok = (vidx >= 0) & (vidx < meshn.n_points)
-            pts[ok] = np.asarray(meshn.points)[vidx[ok]]
-            pts[~ok] = np.asarray(meshn.points).mean(axis=0)
+            pts[ok] = mp[vidx[ok]]
+            if (~ok).any():
+                try:
+                    piece = np.asarray(meshn.connectivity(extraction_mode='all').point_data['RegionId'])
+                    piece = piece if len(piece) == meshn.n_points else None
+                except Exception:  # noqa: BLE001
+                    piece = None
+                order = {nd: i for i, (nd, _) in enumerate(nodes)}
+                for i in np.flatnonzero(~ok):
+                    nbr = [order[m] for m in graph_obj.neighbors(nodes[i][0]) if m in order and ok[order[m]]]
+                    if piece is not None and nbr:
+                        lab = np.bincount(piece[vidx[nbr]]).argmax()
+                        pts[i] = mp[piece == lab].mean(axis=0)
+                    else:
+                        pts[i] = mp.mean(axis=0)
             reeb_pv.points = pts
             # 0 min, 1 saddle, 2 max (MS field), 3 centre, 4 max found by the convex hull only, 5 max found by both
             reeb_pv.point_data['type_code'] = np.array([
@@ -1834,6 +1864,26 @@ def launch_reeb_viewer(mesh_files, reeb_files, scalar_files, graph='reeb'):
             else:
                 pl.remove_actor('reeb_edges')
 
+        if graph == 'mscomplex' and centers is not None:
+            # centre lineage: the path of every cell's centre up to this frame, and the parent -> child links of the
+            # divisions / fusions, so the split / merge of the centres is a continuous branching in space-time
+            pts, lines = [], []
+            past = centers[centers.frame <= frame_idx]
+            for cid, g in past.groupby("cell"):
+                g = g.sort_values("frame"); P = g[["x", "y", "z"]].to_numpy(float)
+                if len(P) > 1:
+                    lines.append([len(P)] + list(range(len(pts), len(pts) + len(P)))); pts.extend(P.tolist())
+            for r in past.itertuples():
+                for par in [int(x) for x in str(r.parents).split(";") if x not in ("", "nan")]:
+                    q = centers[(centers.cell == par) & (centers.frame == r.frame - 1)]
+                    if len(q) and (centers[(centers.cell == r.cell)].frame.min() == r.frame):
+                        a = q[["x", "y", "z"]].to_numpy(float)[0]
+                        lines.append([2, len(pts), len(pts) + 1]); pts.extend([a.tolist(), [r.x, r.y, r.z]])
+            if lines:
+                lp = pv.PolyData(np.asarray(pts, float)); lp.lines = np.concatenate(lines)
+                pl.add_mesh(lp, color='gold', line_width=4, name='center_lineage', render=False)
+            else:
+                pl.remove_actor('center_lineage')
         pl.add_text(f"{'Level-Set Reeb Graph' if graph == 'reeb' else 'Morse-Smale critical-point graph'} - Frame {frame_idx + 1}/{state['total']}", 
                     name='t2', font_size=10, position='upper_left')
     
@@ -2181,7 +2231,7 @@ def launch_ms_viewer(mesh_files, ms_files, tracking_dir=None, lineage_csv=None):
     def clear_all():
         for sub in (0, 1):
             pl.subplot(0, sub)
-            for nm in ("mesh", "bnd", "cps", "bnd2", "cps2", "txt", "legend", "hull"):
+            for nm in ("mesh", "bnd", "cps", "bnd2", "cps2", "txt", "legend", "hull", "hull_edges"):
                 pl.remove_actor(nm, render=False)
         clear_scalar_bars(pl)
 
@@ -2221,6 +2271,12 @@ def launch_ms_viewer(mesh_files, ms_files, tracking_dir=None, lineage_csv=None):
             if hull.n_points:
                 pl.add_mesh(hull, color="lightsteelblue", opacity=state["hull_opacity"], show_edges=True, edge_color="steelblue",
                             line_width=0.5, name="hull", render=False)
+                # the sharp edges of every hull, so a hull hugging a convex cell (e.g. a daughter after a division) stays
+                # visible and the hull bridging a neck visibly splits into one hull per cell
+                fe = hull.extract_feature_edges(feature_angle=15.0, boundary_edges=False, non_manifold_edges=False,
+                                                manifold_edges=False)
+                if fe.n_cells:
+                    pl.add_mesh(fe, color="steelblue", line_width=2.0, name="hull_edges", render=False)
         if tips.n_points:
             draw_cps(1, tips, "cps2", r_node * 1.3, colors=cols)
         pl.add_text("Depth below the convex hull (Huang et al. 2024): protrusion tips are its minima\n"
@@ -2410,4 +2466,4 @@ def visualize_ms_complex(mesh_folder_path, ms_root_path):
     tracking = ms_root / "Region_tracking"
     launch_ms_viewer([str(f) for f in mesh_sel], [str(f) for f in ms_files[:len(mesh_sel)]],
                      tracking_dir=tracking if tracking.is_dir() else None,
-                     lineage_csv=tracking / "region_lineage.csv" if (tracking / "region_lineage.csv").exists() else None)
+                     lineage_csv=tracking / "region_lineage.csv" if (tracking / "region_lineage.csv").exists() else None)

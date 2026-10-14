@@ -1,4 +1,5 @@
 import os
+import json
 import re
 import numpy as np
 import pyvista as pv
@@ -471,15 +472,30 @@ class _StageBar:
 
 
 def _stage_gifs(stage, target_folder, mesh_folder, gif_params=None):
-    """GIF animations of one stage (utils.gif_export) into Results/<scene>/<Stage>/gif; never stops the pipeline."""
+    """
+    GIF animations of one stage (utils.gif_export) into Results/<scene>/<Stage>/gif; never stops the pipeline.
+    A GIF that cannot be written (e.g. a view whose data a short sequence does not have) is reported in
+    Results/<scene>/gif_warnings.txt; on the console only with gif_params={'verbose': True} (default False), so the
+    progress bars stay clean.
+    """
+    verbose = bool((gif_params or {}).get('verbose', False))
+    gp = {k: v for k, v in dict(gif_params or {}).items() if k != 'verbose'}
+    msgs = []
     try:
         from PynamicMesh.utils.gif_export import export_stage_gifs
-        log = export_stage_gifs(stage, target_folder, mesh_folder, gif_params)
-        for label, status, _ in log:
-            if status != "ok":
-                print(f"\n[Warning] GIF of {label} ({stage}): {status}")
+        log = export_stage_gifs(stage, target_folder, mesh_folder, gp)
+        msgs = [f"GIF of {label} ({stage}): {status}" for label, status, _ in log if status != "ok"]
     except Exception as exc:  # noqa: BLE001
-        print(f"\n[Warning] GIFs of the stage '{stage}' could not be written: {exc}")
+        msgs = [f"GIFs of the stage '{stage}' could not be written: {exc}"]
+    if msgs:
+        try:
+            with open(Path(target_folder) / 'gif_warnings.txt', 'a', encoding='utf-8') as fh:
+                fh.write("\n".join(msgs) + "\n")
+        except Exception:  # noqa: BLE001
+            pass
+        if verbose:
+            for m in msgs:
+                print(f"\n[Warning] {m}")
 
 
 def headmap_gif(heatmap_paths, target_folder):
@@ -781,7 +797,8 @@ PROCESS_SEQ_KEYS = [
     'time_params', 'gif', 'gif_params', 'compute_motion_analysis', 'motion_params',
     'reeb_topology_control', 'compute_reeb_dynamics', 'reeb_dynamics_params', 'analysis_graphs'
 ]
-PIPELINE_ONLY_KEYS = {'time_graph_analysis', 'graph_sim', 'graph_metrics'}
+PIPELINE_ONLY_KEYS = {'time_graph_analysis', 'graph_sim', 'graph_metrics',
+                      'compute_topology_events', 'topology_params', 'lineage_mode'}
 
 
 def _run_scene(folder, path, current_params):
@@ -814,6 +831,48 @@ def _run_scene(folder, path, current_params):
     ms_scalar = (current_params.get("ms_scalar") or reeb_scalar).lower()
     needs_spectral_processing = (matrix_tranformation or (compute_reeb and needs_spectral(reeb_scalar, scalar_kwargs))
                                  or (compute_mscomplex and needs_spectral(ms_scalar, scalar_kwargs)))
+
+    # Topology events (surfaces that divide or fuse): detection, lineage, necks, divisions. When the sequence changes
+    # topology (or holds several surfaces) the analyses that need ONE surface per frame run per lineage track instead.
+    if current_params.get("compute_topology_events", True):
+        from PynamicMesh.core.topology_events import compute_topology_events, run_lineage
+        target_folder = path.parent / 'Results' / scene_name
+        tp = dict(current_params.get("topology_params") or {})
+        if current_params.get("lineage_mode") is not None:
+            tp["lineage"] = current_params.get("lineage_mode")
+        summary = compute_topology_events(folder, target_folder, loader=load_aligned_mesh,
+                                          fm_params=current_params.get("fm_params"), verbose=False, **tp)
+        if summary and summary.get("needs_lineage") and tp.get("lineage", "auto") is not False:
+            print(f"\n[Topology] {scene_name}: {summary.get('events') or 'several surfaces'} -> lineage mode "
+                  f"({summary.get('n_tracks')} tracks); the whole scene gets the basic geometry only.")
+            basic = dict(seq_args)
+            for k_ in ("matrix_tranformation", "diagonal_analysis", "isometric_analysis", "compute_reeb",
+                       "compute_physic_fields", "compute_mscomplex", "mscomplex_graph", "compute_parametrization",
+                       "compute_trajectories", "compute_dynamic_analysis", "compute_graph_animation",
+                       "compute_motion_analysis", "compute_reeb_dynamics"):
+                basic[k_] = False
+            process_sequence(folder=folder, path=path, needs_spectral_processing=False, scalar_kwargs=scalar_kwargs,
+                             **basic)
+            if current_params.get('gif', False):
+                _stage_gifs('topology_events', target_folder, folder, current_params.get('gif_params'))
+            run_lineage(target_folder, current_params, tp.get("min_track_frames", 3))
+            # the full scene again, from the tracks: scene correspondences, material tracking, scene physical
+            # fields, scene graphs and graph surgery, comparison of the cells (TopologyEvents/Scene)
+            # the standard results of the WHOLE scene, built from the tracks (Results/<scene>/<stage>/), then its GIFs
+            try:
+                from PynamicMesh.core.lineage_assembly import assemble_scene
+                if tp.get("scene_assembly", True):
+                    assemble_scene(target_folder, folder, loader=load_aligned_mesh, params=current_params, verbose=False,
+                                   maps=tp.get("scene_maps", "auto"))
+                    if current_params.get('gif', False):
+                        for st in ('physics', 'reeb', 'ms_complex', 'parametrization', 'trajectories', 'graph_animation',
+                                   'dynamic_analysis', 'motion_analysis', 'reeb_dynamics', 'scene'):
+                            _stage_gifs(st, target_folder, folder, current_params.get('gif_params'))
+            except Exception as exc:  # noqa: BLE001 - the tracks are complete even if the assembly fails
+                print(f"\n[Warning] scene assembly failed for {scene_name}: {exc}")
+            return None
+        if current_params.get('gif', False):
+            _stage_gifs('topology_events', target_folder, folder, current_params.get('gif_params'))
 
     FM_out_path, RG_out_path = process_sequence(
         folder=folder,
@@ -962,11 +1021,38 @@ def run_pipeline(path_str, is_batch=False, batch_kwargs=None, compute_devices=No
     _compare(path, [n for n, st, _, _ in results if st == 'ok'], compare_scenes_flag)
 
 
+def _topology_signature(results_root, name):
+    """Topology class of a processed scene: 'no events' or its events ('division x1, fusion x1')."""
+    f = Path(results_root) / name / 'TopologyEvents' / 'summary.json'
+    try:
+        ev = json.load(open(f)).get('events') or {}
+    except Exception:  # noqa: BLE001 - stage not run: a regular scene
+        ev = {}
+    return ', '.join(f"{k} x{v}" for k, v in sorted(ev.items())) or 'no events'
+
+
 def _compare(path, names, flag):
-    """Comparison of the scenes of the run (Results/_comparison/): 'auto' = when at least two scenes were processed."""
+    """
+    Comparison of the scenes of the run (Results/_comparison/). 'auto': scenes are compared only with scenes of the
+    same topology class (same topology events: a dividing scene with dividing scenes, regular scenes with regular
+    scenes), when a class holds at least two scenes; with several such classes every class gets its own folder
+    (_comparison_<class>). True: all the scenes together.
+    """
     if flag is False or len(names) < 2:
         return
+    root = Path(path).parent / 'Results'
     try:
-        compare_scenes(Path(path).parent / 'Results', names)
+        if flag is True:
+            compare_scenes(root, names); return
+        groups = {}
+        for n in names:
+            groups.setdefault(_topology_signature(root, n), []).append(n)
+        groups = {g: ns for g, ns in groups.items() if len(ns) >= 2}
+        for g, ns in groups.items():
+            tag = '_comparison' if len(groups) == 1 else '_comparison_' + re.sub(r'[^A-Za-z0-9]+', '_', g).strip('_')
+            compare_scenes(root, ns, out_name=tag)
+        skipped = [n for n in names if not any(n in ns for ns in groups.values())]
+        if skipped:
+            print(f"\n[Comparison] not compared (no other scene of the same topology class): {', '.join(skipped)}")
     except Exception as exc:  # noqa: BLE001 - never stops the pipeline
         print(f"\n[Warning] scene comparison skipped: {exc}")

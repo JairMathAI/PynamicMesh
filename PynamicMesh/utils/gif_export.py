@@ -261,7 +261,8 @@ def export_stage_gifs(stage, target_folder, mesh_folder, params=None):
         else:                                          # viewers of dynamics_visualizers (_FrameViewer)
             stage_dir = {"parametrization": "Parametrization", "trajectories": "Trajectories",
                          "dynamic_analysis": "DynamicAnalysis", "graph_animation": "GraphAnimation",
-                         "motion_analysis": "MotionAnalysis", "reeb_dynamics": "ReebDynamics"}[stage]
+                         "motion_analysis": "MotionAnalysis", "reeb_dynamics": "ReebDynamics",
+                         "topology_events": "TopologyEvents", "scene": "TopologyEvents"}[stage]
             out = target_folder / stage_dir / "gif"
             calls = []
             if stage == "parametrization":
@@ -271,7 +272,7 @@ def export_stage_gifs(stage, target_folder, mesh_folder, params=None):
                          ("dynamic_trajectories", lambda: DV.visualize_dynamic_trajectories(str(target_folder), mesh_path=str(mesh_folder)))]
                 interp = target_folder / "Trajectories" / "interpolation"
                 for f in sorted(interp.glob("*.npy")) if interp.is_dir() else []:
-                    if f.stem != "query_times":
+                    if f.stem not in ("query_times", "cut_faces"):
                         calls.append((f"interp_{f.stem}", lambda s_=f.stem: DV.visualize_interpolation(str(target_folder), s_, mesh_path=str(mesh_folder))))
             elif stage == "dynamic_analysis":
                 da = target_folder / "DynamicAnalysis"
@@ -279,7 +280,7 @@ def export_stage_gifs(stage, target_folder, mesh_folder, params=None):
                     calls.append(("hodge", lambda: DV.visualize_hodge(str(target_folder), mesh_path=str(mesh_folder))))
                 if (da / "FTLE").is_dir():
                     calls.append(("ftle", lambda: DV.visualize_ftle(str(target_folder), mesh_path=str(mesh_folder))))
-                if (da / "ShapeSpace").is_dir():
+                if (da / "ShapeSpace" / "mode_meshes" / "mean_shape.obj").exists():   # shape space computed (enough frames)
                     calls.append(("shape_modes", lambda: DV.visualize_shape_modes(str(target_folder))))
             elif stage == "motion_analysis":
                 if (target_folder / "MotionAnalysis" / "RigidMotion").is_dir():
@@ -287,6 +288,12 @@ def export_stage_gifs(stage, target_folder, mesh_folder, params=None):
                 if (target_folder / "Physical_fields" / "from_trajectories" / "comparison").is_dir():
                     # frame-to-frame vs tracked-mesh physical fields: one GIF per field
                     calls.append(("field_comparison", lambda: DV.visualize_field_comparison(str(target_folder), mesh_path=str(mesh_folder))))
+            elif stage == "scene":
+                if (target_folder / "TopologyEvents" / "Lineage_tracking" / "material.npz").exists():
+                    calls = [("scene", lambda: DV.visualize_scene(str(target_folder), str(mesh_folder)))]
+            elif stage == "topology_events":
+                if (target_folder / "TopologyEvents" / "components.csv").exists():
+                    calls = [("topology_events", lambda: DV.visualize_lineage(str(target_folder), str(mesh_folder)))]
             elif stage == "reeb_dynamics":
                 if (target_folder / "ReebDynamics" / "paths.csv").exists():
                     calls = [("reeb_dynamics", lambda: DV.visualize_reeb_dynamics(str(target_folder), mesh_path=str(mesh_folder)))]
@@ -319,11 +326,12 @@ def _physics_pages(npz_file):
 #  Stand-alone use: GIFs from results that are already on disk (no recomputation)
 # ----------------------------------------------------------------------------------------------------------------- #
 STAGES = ("basic_geometry", "physics", "reeb", "ms_complex", "parametrization", "trajectories", "graph_animation",
-          "dynamic_analysis", "motion_analysis", "reeb_dynamics")
+          "dynamic_analysis", "motion_analysis", "reeb_dynamics", "topology_events", "scene")
 _STAGE_RESULT = {"basic_geometry": "Basic_Geometry", "physics": "Physical_fields", "reeb": "Reeb_Graphs",
                  "ms_complex": "MSComplexAnalysis", "parametrization": "Parametrization", "trajectories": "Trajectories",
                  "graph_animation": "GraphAnimation", "dynamic_analysis": "DynamicAnalysis",
-                 "motion_analysis": "MotionAnalysis", "reeb_dynamics": "ReebDynamics"}
+                 "motion_analysis": "MotionAnalysis", "reeb_dynamics": "ReebDynamics",
+                 "topology_events": "TopologyEvents", "scene": "TopologyEvents"}
 
 
 def _has_meshes(folder):
